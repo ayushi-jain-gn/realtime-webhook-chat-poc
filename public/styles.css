@@ -94,6 +94,10 @@ select {
 }
 
 .chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 16px 18px;
   color: #fff;
   background: linear-gradient(135deg, #1b7b56, #169e68);
@@ -160,26 +164,9 @@ select {
   color: var(--muted);
 }
 
-.ticks {
-  letter-spacing: -1px;
-  font-weight: 700;
-}
-
-.ticks-sent {
-  color: #7b878d;
-}
-
-.ticks-delivered {
-  color: #6f7a80;
-}
-
-.ticks-read {
-  color: #34b7f1;
-}
-
 .composer {
   display: grid;
-  grid-template-columns: 170px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   padding: 12px;
   border-top: 1px solid var(--border);
@@ -223,6 +210,23 @@ select {
   background: #ff6b6b;
 }
 
+.ticks {
+  letter-spacing: -1px;
+  font-weight: 700;
+}
+
+.ticks-sent {
+  color: #7b878d;
+}
+
+.ticks-delivered {
+  color: #6f7a80;
+}
+
+.ticks-read {
+  color: #34b7f1;
+}
+
 @media (max-width: 920px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -240,6 +244,10 @@ select {
 
   .messages {
     padding-bottom: 80px;
+  }
+
+  .chat-header {
+    flex-wrap: wrap;
   }
 
   .composer {
