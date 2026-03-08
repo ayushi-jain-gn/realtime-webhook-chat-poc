@@ -4,5 +4,8 @@ node_modules/
 logs/
 *.log
 data/messages.ndjson
+data/messages.db
+data/messages.db-shm
+data/messages.db-wal
 .idea/
 .env.example

@@ -151,9 +151,30 @@ select {
 }
 
 .meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
   margin-top: 6px;
   font-size: 11px;
   color: var(--muted);
+}
+
+.ticks {
+  letter-spacing: -1px;
+  font-weight: 700;
+}
+
+.ticks-sent {
+  color: #7b878d;
+}
+
+.ticks-delivered {
+  color: #6f7a80;
+}
+
+.ticks-read {
+  color: #34b7f1;
 }
 
 .composer {

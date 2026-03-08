@@ -7,14 +7,19 @@ Proof-of-concept service that captures incoming/outgoing messages via webhook, p
 - `POST /webhook/incoming`: capture incoming message events
 - `POST /webhook/outgoing`: capture outgoing message events
 - lightweight processing: normalize schema + derive tags (`urgent`, `problem`, etc.)
-- persistence: append-only `data/messages.ndjson`
+- persistence: SQLite (`data/messages.db`)
 - forwarding:
-  - live push to desktop consumers via `GET /stream` (Server-Sent Events)
+  - live push to clients via `GET /ws` (WebSocket) and `GET /stream` (SSE fallback)
   - optional forward to another webhook (`FORWARD_WEBHOOK_URL`)
 - query API: `GET /messages?direction=incoming|outgoing&limit=50`
+- read-receipts API: `POST /messages/:id/read`
 - health API: `GET /health`
 
 ## Run
+
+```bash
+npm install
+```
 
 ```bash
 npm start
@@ -28,8 +33,9 @@ Open `http://localhost:8080` in your browser.
 
 - Use **Send as me** to post to `/webhook/outgoing`
 - Use **Simulate incoming** to post to `/webhook/incoming`
-- Messages update in real-time through `/stream`
-- If `WEBHOOK_TOKEN` is set, enter it in the UI token field and click **Reconnect stream**
+- Messages update in real-time via WebSocket (`/ws`)
+- Read receipts are automatic when recipient tab is in foreground/focused (WhatsApp-like ticks)
+- If `WEBHOOK_TOKEN` is set, enter it in the UI token field (manual reconnect is optional)
 
 ## Optional configuration
 
@@ -190,6 +196,14 @@ curl -X POST http://localhost:8080/webhook/outgoing \
 
 ```bash
 curl 'http://localhost:8080/messages?limit=20'
+```
+
+## Mark message as read
+
+```bash
+curl -X POST http://localhost:8080/messages/<message-id>/read \
+  -H 'Content-Type: application/json' \
+  -d '{"reader":"agent-7"}'
 ```
 
 ## Desktop app consumption example

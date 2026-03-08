@@ -6,35 +6,30 @@ const els = {
   myId: document.getElementById('my-id'),
   peerId: document.getElementById('peer-id'),
   token: document.getElementById('token'),
-  status: document.getElementById('connection-status'),
   statusText: document.getElementById('connection-status-text'),
   statusDot: document.getElementById('status-dot'),
   title: document.getElementById('chat-title'),
   connectBtn: document.getElementById('connect-btn')
 };
 
-let stream;
-let reconnectTimer;
-let watchdogTimer;
-let liveSyncTimer;
-let tokenDebounceTimer;
-let retryAttempt = 0;
-let lastEventAt = 0;
-let isManualReconnect = false;
-
-const seen = new Set();
 const STORAGE_KEY = 'realtime-chat-poc:v1';
+const LIVE_SYNC_MS = 1200;
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 15000;
-const WATCHDOG_EVERY_MS = 10000;
-const STALE_AFTER_MS = 45000;
-const LIVE_SYNC_MS = 1200;
+const READ_SWEEP_MS = 1200;
+
+const messagesById = new Map();
+const inflightReadIds = new Set();
+let socket;
+let liveSyncTimer;
+let reconnectTimer;
+let tokenDebounceTimer;
+let readSweepTimer;
+let retryAttempt = 0;
 
 function loadPrefs() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return {};
-    return JSON.parse(raw);
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
   } catch {
     return {};
   }
@@ -73,6 +68,7 @@ function savePrefs() {
     token: els.token.value,
     direction: els.direction.value
   };
+
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   writePrefsToHash(payload);
 }
@@ -106,39 +102,110 @@ function setConnection(state, text) {
   }
 }
 
+function syncTitle() {
+  els.title.textContent = els.peerId.value.trim() || 'Contact';
+}
+
 function formatTime(isoString) {
   if (!isoString) return '';
   return new Date(isoString).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function addMessage(message) {
-  if (seen.has(message.id)) return;
-  seen.add(message.id);
+function statusLabel(message, mine) {
+  if (message.status === 'read') {
+    return message.readBy ? `read by ${message.readBy}` : 'read';
+  }
+  if (mine) {
+    return message.status || 'sent';
+  }
+  return message.status || 'received';
+}
 
-  const mine = normalizeId(message.sender) === normalizeId(els.myId.value);
-  const row = document.createElement('article');
-  row.className = `message ${mine ? 'outgoing' : 'incoming'}`;
+function statusTicks(message, mine) {
+  if (!mine) return null;
+  if (message.status === 'read') {
+    return { icon: '✓✓', className: 'ticks ticks-read' };
+  }
+  if (message.status === 'received') {
+    return { icon: '✓✓', className: 'ticks ticks-delivered' };
+  }
+  return { icon: '✓', className: 'ticks ticks-sent' };
+}
 
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
+function isForegroundActive() {
+  return document.visibilityState === 'visible' && document.hasFocus();
+}
 
-  const body = document.createElement('div');
-  body.textContent = message.text || '[empty message]';
+function isNearBottom() {
+  const threshold = 80;
+  const distance = els.messages.scrollHeight - els.messages.scrollTop - els.messages.clientHeight;
+  return distance <= threshold;
+}
 
-  const meta = document.createElement('div');
-  meta.className = 'meta';
-  meta.textContent =
-    `${message.sender} -> ${message.recipient} • ${formatTime(message.receivedAt)} • ${message.direction}`;
+function renderAllMessages() {
+  const shouldStickBottom = isNearBottom();
 
-  bubble.append(body, meta);
-  row.appendChild(bubble);
-  els.messages.appendChild(row);
-  els.messages.scrollTop = els.messages.scrollHeight;
+  const sorted = [...messagesById.values()].sort((a, b) => {
+    return new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime();
+  });
+
+  els.messages.innerHTML = '';
+  const myId = normalizeId(els.myId.value);
+
+  for (const message of sorted) {
+    const mine = normalizeId(message.sender) === myId;
+
+    const row = document.createElement('article');
+    row.className = `message ${mine ? 'outgoing' : 'incoming'}`;
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+
+    const body = document.createElement('div');
+    body.textContent = message.text || '[empty message]';
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const left = document.createElement('span');
+    left.textContent = `${formatTime(message.receivedAt)}${mine ? '' : ` • ${statusLabel(message, mine)}`}`;
+    meta.appendChild(left);
+
+    const tick = statusTicks(message, mine);
+    if (tick) {
+      const right = document.createElement('span');
+      right.className = tick.className;
+      right.textContent = tick.icon;
+      meta.appendChild(right);
+    }
+
+    bubble.append(body, meta);
+
+    row.appendChild(bubble);
+    els.messages.appendChild(row);
+  }
+
+  if (shouldStickBottom) {
+    els.messages.scrollTop = els.messages.scrollHeight;
+  }
+}
+
+function upsertMessage(message) {
+  const existing = messagesById.get(message.id) || {};
+  messagesById.set(message.id, { ...existing, ...message });
+  renderAllMessages();
+  autoReadVisibleMessages().catch(() => {});
+}
+
+function applyMessageStatusUpdate(update) {
+  const existing = messagesById.get(update.id);
+  if (!existing) return;
+  messagesById.set(update.id, { ...existing, ...update });
+  renderAllMessages();
 }
 
 async function loadHistory() {
-  const queryToken = els.token.value.trim();
-  const query = queryToken ? `?limit=200&token=${encodeURIComponent(queryToken)}` : '?limit=200';
+  const token = els.token.value.trim();
+  const query = token ? `?limit=250&token=${encodeURIComponent(token)}` : '?limit=250';
   const response = await fetch(`/messages${query}`, { headers: authHeaders() });
 
   if (!response.ok) {
@@ -146,38 +213,49 @@ async function loadHistory() {
   }
 
   const payload = await response.json();
-  els.messages.innerHTML = '';
-  seen.clear();
-
-  for (const msg of payload.messages.slice().reverse()) {
-    addMessage(msg);
-  }
+  messagesById.clear();
+  payload.messages.forEach((message) => {
+    messagesById.set(message.id, message);
+  });
+  renderAllMessages();
+  autoReadVisibleMessages().catch(() => {});
 }
 
 async function fetchRecentIncremental() {
-  const queryToken = els.token.value.trim();
-  const query = queryToken ? `?limit=50&token=${encodeURIComponent(queryToken)}` : '?limit=50';
+  const token = els.token.value.trim();
+  const query = token ? `?limit=80&token=${encodeURIComponent(token)}` : '?limit=80';
   const response = await fetch(`/messages${query}`, { headers: authHeaders() });
   if (!response.ok) return;
+
   const payload = await response.json();
-  for (const msg of payload.messages.slice().reverse()) {
-    addMessage(msg);
+  let changed = false;
+  payload.messages.forEach((message) => {
+    const existing = messagesById.get(message.id) || {};
+    const merged = { ...existing, ...message };
+    if (JSON.stringify(existing) !== JSON.stringify(merged)) {
+      messagesById.set(message.id, merged);
+      changed = true;
+    }
+  });
+  if (changed) renderAllMessages();
+  if (changed) {
+    autoReadVisibleMessages().catch(() => {});
   }
 }
 
-function startLiveSync() {
-  if (liveSyncTimer) return;
-  liveSyncTimer = setInterval(() => {
-    fetchRecentIncremental().catch(() => {
-      // Keep sync loop resilient across transient tunnel/network drops.
-    });
-  }, LIVE_SYNC_MS);
+function wsUrl() {
+  const token = els.token.value.trim();
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const base = `${protocol}//${window.location.host}/ws`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
-function closeStream() {
-  if (stream) {
-    stream.close();
-    stream = undefined;
+function closeSocket() {
+  if (socket) {
+    socket.onclose = null;
+    socket.onerror = null;
+    socket.close();
+    socket = undefined;
   }
 }
 
@@ -188,18 +266,58 @@ function scheduleReconnect(reason = 'Reconnecting...') {
   const jitter = Math.floor(Math.random() * 400);
   const waitMs = delay + jitter;
   retryAttempt += 1;
+
   setConnection('reconnecting', `${reason} retry in ${Math.round(waitMs / 1000)}s`);
 
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = undefined;
     try {
-      await loadHistory();
-      connectStream();
+      await reconnectNow();
     } catch (error) {
       setConnection('reconnecting', error.message);
-      scheduleReconnect('Reconnecting...');
+      scheduleReconnect('Reconnect failed');
     }
   }, waitMs);
+}
+
+function connectRealtime() {
+  closeSocket();
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+  }
+
+  setConnection('connecting', 'Connecting...');
+  socket = new WebSocket(wsUrl());
+
+  socket.onopen = () => {
+    retryAttempt = 0;
+    setConnection('connected', 'Connected');
+    fetchRecentIncremental().catch(() => {});
+  };
+
+  socket.onmessage = (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      if (payload.event === 'message') {
+        upsertMessage(payload.data);
+      } else if (payload.event === 'message_status') {
+        applyMessageStatusUpdate(payload.data);
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  socket.onerror = () => {
+    setConnection('disconnected', 'Disconnected');
+  };
+
+  socket.onclose = () => {
+    setConnection('disconnected', 'Disconnected');
+    scheduleReconnect('Disconnected');
+  };
 }
 
 async function reconnectNow() {
@@ -207,85 +325,19 @@ async function reconnectNow() {
     clearTimeout(reconnectTimer);
     reconnectTimer = undefined;
   }
+
   retryAttempt = 0;
-  closeStream();
   await loadHistory();
-  connectStream();
+  connectRealtime();
 }
 
-function markActivity() {
-  lastEventAt = Date.now();
-}
-
-function startWatchdog() {
-  if (watchdogTimer) {
-    clearInterval(watchdogTimer);
-  }
-
-  watchdogTimer = setInterval(() => {
-    if (!stream) return;
-    if (!lastEventAt) return;
-
-    const staleFor = Date.now() - lastEventAt;
-    if (staleFor > STALE_AFTER_MS) {
-      closeStream();
-      scheduleReconnect('Stream stale');
-    }
-  }, WATCHDOG_EVERY_MS);
-}
-
-function connectStream() {
-  closeStream();
-
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = undefined;
-  }
-
-  const queryToken = els.token.value.trim();
-  const url = queryToken ? `/stream?token=${encodeURIComponent(queryToken)}` : '/stream';
-
-  setConnection('connecting', 'Connecting...');
-  stream = new EventSource(url);
-
-  stream.addEventListener('open', () => {
-    retryAttempt = 0;
-    markActivity();
-    setConnection('connected', 'Connected');
+function startLiveSync() {
+  if (liveSyncTimer) return;
+  liveSyncTimer = setInterval(() => {
     fetchRecentIncremental().catch(() => {
-      // Ignore one-off catch-up failures.
+      // Keep polling as fallback when websocket path is unstable.
     });
-  });
-
-  const handleMessageEvent = (event) => {
-    try {
-      markActivity();
-      addMessage(JSON.parse(event.data));
-    } catch (error) {
-      console.error(error);
-    }
-  };
-
-  stream.onmessage = handleMessageEvent;
-  stream.addEventListener('message', handleMessageEvent);
-  stream.addEventListener('ping', () => {
-    markActivity();
-  });
-
-  stream.addEventListener('error', () => {
-    setConnection('disconnected', 'Disconnected');
-    closeStream();
-
-    if (isManualReconnect) {
-      isManualReconnect = false;
-      scheduleReconnect('Reconnect failed');
-      return;
-    }
-
-    scheduleReconnect('Disconnected');
-  });
-
-  startWatchdog();
+  }, LIVE_SYNC_MS);
 }
 
 async function sendMessage(event) {
@@ -320,17 +372,74 @@ async function sendMessage(event) {
 
   els.input.value = '';
   els.input.focus();
-  fetchRecentIncremental().catch(() => {
-    // Ignore one-off sync issues after send.
-  });
 }
 
-function syncTitle() {
-  els.title.textContent = els.peerId.value.trim() || 'Contact';
+async function markAsRead(messageId) {
+  if (inflightReadIds.has(messageId)) return;
+  inflightReadIds.add(messageId);
+  try {
+    const response = await fetch(`/messages/${encodeURIComponent(messageId)}/read`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders()
+      },
+      body: JSON.stringify({
+        reader: els.myId.value.trim() || 'unknown'
+      })
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `Failed to mark read (${response.status})`);
+    }
+
+    const payload = await response.json();
+    if (payload.message) {
+      upsertMessage(payload.message);
+    }
+  } finally {
+    inflightReadIds.delete(messageId);
+  }
+}
+
+async function autoReadVisibleMessages() {
+  if (!isForegroundActive()) return;
+
+  const myId = normalizeId(els.myId.value);
+  const unreadForMe = [];
+  for (const message of messagesById.values()) {
+    if (
+      normalizeId(message.recipient) === myId &&
+      message.status !== 'read' &&
+      !inflightReadIds.has(message.id)
+    ) {
+      unreadForMe.push(message.id);
+    }
+  }
+
+  for (const id of unreadForMe) {
+    try {
+      await markAsRead(id);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+}
+
+function startReadSweep() {
+  if (readSweepTimer) return;
+  readSweepTimer = setInterval(() => {
+    autoReadVisibleMessages().catch(() => {});
+  }, READ_SWEEP_MS);
 }
 
 function init() {
   applyPrefs();
+  syncTitle();
+  savePrefs();
+  startLiveSync();
+  startReadSweep();
 
   els.composer.addEventListener('submit', (event) => {
     sendMessage(event).catch((error) => {
@@ -339,41 +448,26 @@ function init() {
     });
   });
 
-  els.connectBtn.addEventListener('click', async () => {
-    try {
-      isManualReconnect = true;
-      await reconnectNow();
-    } catch (error) {
+  els.connectBtn.addEventListener('click', () => {
+    reconnectNow().catch((error) => {
       setConnection('reconnecting', error.message);
-      scheduleReconnect('Reconnect failed');
-    }
-  });
-
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && !stream) {
-      scheduleReconnect('Resuming...');
-    }
-  });
-
-  window.addEventListener('online', () => {
-    scheduleReconnect('Network restored');
-  });
-
-  window.addEventListener('focus', () => {
-    fetchRecentIncremental().catch(() => {
-      // Keep trying on next ticks.
+      scheduleReconnect('Manual reconnect failed');
     });
-    if (!stream) {
-      scheduleReconnect('Resuming...');
-    }
   });
 
-  els.peerId.addEventListener('input', syncTitle);
-  els.myId.addEventListener('input', savePrefs);
+  els.myId.addEventListener('input', () => {
+    savePrefs();
+    renderAllMessages();
+  });
+
   els.peerId.addEventListener('input', () => {
     syncTitle();
     savePrefs();
+    renderAllMessages();
   });
+
+  els.direction.addEventListener('change', savePrefs);
+
   els.token.addEventListener('input', () => {
     savePrefs();
     if (tokenDebounceTimer) {
@@ -382,21 +476,37 @@ function init() {
     tokenDebounceTimer = setTimeout(() => {
       reconnectNow().catch((error) => {
         setConnection('reconnecting', error.message);
-        scheduleReconnect('Auth update');
+        scheduleReconnect('Auth update failed');
       });
     }, 500);
   });
-  els.direction.addEventListener('change', savePrefs);
 
-  syncTitle();
-  savePrefs();
-  startLiveSync();
-
-  reconnectNow()
-    .catch((error) => {
-      setConnection('reconnecting', error.message);
-      scheduleReconnect('Initial connect failed');
+  window.addEventListener('online', () => {
+    reconnectNow().catch(() => {
+      scheduleReconnect('Network restored');
     });
+  });
+
+  window.addEventListener('focus', () => {
+    fetchRecentIncremental().catch(() => {});
+    autoReadVisibleMessages().catch(() => {});
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      reconnectNow().catch(() => {
+        scheduleReconnect('Resuming...');
+      });
+    }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      autoReadVisibleMessages().catch(() => {});
+    }
+  });
+
+  reconnectNow().catch((error) => {
+    setConnection('reconnecting', error.message);
+    scheduleReconnect('Initial connect failed');
+  });
 }
 
 init();
