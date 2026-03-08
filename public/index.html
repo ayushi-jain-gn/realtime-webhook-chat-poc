@@ -9,28 +9,39 @@
   <body>
     <main class="app-shell">
       <aside class="sidebar">
-        <h1>Chats</h1>
-        <p class="muted">Realtime webhook demo</p>
+        <div class="brand">
+          <h1>Realtime Chat</h1>
+          <p class="subtle">Webhook + stream demo</p>
+        </div>
+
         <div class="form-group">
           <label for="my-id">Me</label>
           <input id="my-id" value="agent-1" />
         </div>
+
         <div class="form-group">
           <label for="peer-id">Contact</label>
           <input id="peer-id" value="customer-1" />
         </div>
+
         <div class="form-group">
-          <label for="token">Token (optional)</label>
+          <label for="token">Token</label>
           <input id="token" placeholder="WEBHOOK_TOKEN" />
         </div>
-        <button id="connect-btn" class="btn secondary">Reconnect stream</button>
+
+        <button id="connect-btn" class="btn secondary">Reconnect (manual)</button>
+        <p class="hint">Connection auto-recovers. Manual reconnect is optional.</p>
+        <p class="hint">Profile is saved in URL hash; reuse it when tunnel URL changes.</p>
       </aside>
 
       <section class="chat-panel">
         <header class="chat-header">
-          <div>
+          <div class="title-wrap">
             <h2 id="chat-title">customer-1</h2>
-            <p id="connection-status" class="muted">Connecting...</p>
+            <p id="connection-status" class="status-line">
+              <span id="status-dot" class="status-dot connecting"></span>
+              <span id="connection-status-text">Connecting...</span>
+            </p>
           </div>
         </header>
 

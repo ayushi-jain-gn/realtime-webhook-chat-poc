@@ -14,6 +14,7 @@ const STORE_FILE = path.join(DATA_DIR, 'messages.ndjson');
 const PUBLIC_DIR = path.resolve(__dirname, '..', 'public');
 
 const MESSAGE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const SSE_HEARTBEAT_MS = 15000;
 const inMemoryMessages = [];
 const sseClients = new Set();
 
@@ -236,9 +237,11 @@ function handleSse(req, res) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     Connection: 'keep-alive',
-    'Cache-Control': 'no-cache'
+    'Cache-Control': 'no-cache, no-transform',
+    'X-Accel-Buffering': 'no'
   });
 
+  res.write('retry: 3000\n\n');
   res.write(`event: ready\ndata: ${JSON.stringify({ connectedAt: new Date().toISOString() })}\n\n`);
   sseClients.add(res);
 
@@ -246,6 +249,15 @@ function handleSse(req, res) {
     sseClients.delete(res);
     res.end();
   });
+}
+
+function startHeartbeat() {
+  setInterval(() => {
+    const heartbeat = `event: ping\ndata: ${JSON.stringify({ ts: new Date().toISOString() })}\n\n`;
+    for (const client of sseClients) {
+      client.write(heartbeat);
+    }
+  }, SSE_HEARTBEAT_MS);
 }
 
 function listMessages(req, res) {
@@ -273,6 +285,7 @@ function health(res) {
 
 async function start() {
   await ensureStorage();
+  startHeartbeat();
 
   const server = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url, `http://${req.headers.host}`);

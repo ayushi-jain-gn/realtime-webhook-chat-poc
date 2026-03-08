@@ -6,7 +6,11 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node src/server.js"
+    "dev": "node src/server.js",
+    "share": "./scripts/share.sh auto",
+    "share:ngrok": "./scripts/share.sh ngrok",
+    "share:cloudflared": "./scripts/share.sh cloudflared",
+    "share:cloudflared:named": "./scripts/share.sh cloudflared-named"
   },
   "engines": {
     "node": ">=18"
