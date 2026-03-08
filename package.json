@@ -1,0 +1,14 @@
+{
+  "name": "poc-realtime-messages",
+  "version": "0.1.0",
+  "private": true,
+  "description": "POC webhook pipeline for real-time incoming/outgoing desktop messages",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

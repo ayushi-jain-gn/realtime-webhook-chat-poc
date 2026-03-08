@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Realtime Chat POC</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <h1>Chats</h1>
+        <p class="muted">Realtime webhook demo</p>
+        <div class="form-group">
+          <label for="my-id">Me</label>
+          <input id="my-id" value="agent-1" />
+        </div>
+        <div class="form-group">
+          <label for="peer-id">Contact</label>
+          <input id="peer-id" value="customer-1" />
+        </div>
+        <div class="form-group">
+          <label for="token">Token (optional)</label>
+          <input id="token" placeholder="WEBHOOK_TOKEN" />
+        </div>
+        <button id="connect-btn" class="btn secondary">Reconnect stream</button>
+      </aside>
+
+      <section class="chat-panel">
+        <header class="chat-header">
+          <div>
+            <h2 id="chat-title">customer-1</h2>
+            <p id="connection-status" class="muted">Connecting...</p>
+          </div>
+        </header>
+
+        <section id="messages" class="messages"></section>
+
+        <form id="composer" class="composer">
+          <select id="direction">
+            <option value="outgoing">Send as me</option>
+            <option value="incoming">Simulate incoming</option>
+          </select>
+          <input id="message-input" placeholder="Type a message" autocomplete="off" required />
+          <button class="btn" type="submit">Send</button>
+        </form>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
