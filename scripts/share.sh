@@ -88,7 +88,7 @@ elif [[ "$TUNNEL" == "cloudflared-named" ]]; then
 else
   echo "Starting cloudflared tunnel to localhost:${PORT}"
   TUNNEL_LOG_FILE="$(mktemp -t poc-cloudflared-log.XXXXXX)"
-  cloudflared tunnel --url "http://localhost:${PORT}" --protocol http2 >"$TUNNEL_LOG_FILE" 2>&1 &
+  cloudflared tunnel --url "http://127.0.0.1:${PORT}" --protocol http2 >"$TUNNEL_LOG_FILE" 2>&1 &
   TUNNEL_PID=$!
   for _ in {1..60}; do
     if ! kill -0 "$TUNNEL_PID" >/dev/null 2>&1; then
