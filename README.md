@@ -56,22 +56,6 @@ HOST=0.0.0.0 PORT=8080 WEBHOOK_TOKEN=shared-secret npm start
 4. In the UI, both enter `shared-secret` as Token and click **Reconnect stream**.
 5. Set `Me` and `Contact` IDs accordingly (for example user A: `alice` -> `bob`, user B: `bob` -> `alice`).
 
-## Publish to GitHub
-
-```bash
-git add .
-git commit -m "Build realtime messaging webhook POC with chat UI"
-git branch -M main
-git remote add origin <your-github-repo-url>
-git push -u origin main
-```
-
-If `origin` already exists, run:
-
-```bash
-git remote set-url origin <your-github-repo-url>
-git push -u origin main
-```
 
 ## Send test events
 
