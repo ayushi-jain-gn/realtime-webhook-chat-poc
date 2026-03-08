@@ -151,21 +151,30 @@ select {
 }
 
 .meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
   margin-top: 6px;
   font-size: 11px;
   color: var(--muted);
 }
 
-.read-btn {
-  margin-top: 8px;
-  border: 0;
-  border-radius: 10px;
-  padding: 6px 10px;
-  font-size: 11px;
+.ticks {
+  letter-spacing: -1px;
   font-weight: 700;
-  background: #d9eefc;
-  color: #12476b;
-  cursor: pointer;
+}
+
+.ticks-sent {
+  color: #7b878d;
+}
+
+.ticks-delivered {
+  color: #6f7a80;
+}
+
+.ticks-read {
+  color: #34b7f1;
 }
 
 .composer {

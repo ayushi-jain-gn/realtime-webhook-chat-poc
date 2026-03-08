@@ -16,12 +16,15 @@ const STORAGE_KEY = 'realtime-chat-poc:v1';
 const LIVE_SYNC_MS = 1200;
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 15000;
+const READ_SWEEP_MS = 1200;
 
 const messagesById = new Map();
+const inflightReadIds = new Set();
 let socket;
 let liveSyncTimer;
 let reconnectTimer;
 let tokenDebounceTimer;
+let readSweepTimer;
 let retryAttempt = 0;
 
 function loadPrefs() {
@@ -118,6 +121,21 @@ function statusLabel(message, mine) {
   return message.status || 'received';
 }
 
+function statusTicks(message, mine) {
+  if (!mine) return null;
+  if (message.status === 'read') {
+    return { icon: '✓✓', className: 'ticks ticks-read' };
+  }
+  if (message.status === 'received') {
+    return { icon: '✓✓', className: 'ticks ticks-delivered' };
+  }
+  return { icon: '✓', className: 'ticks ticks-sent' };
+}
+
+function isForegroundActive() {
+  return document.visibilityState === 'visible' && document.hasFocus();
+}
+
 function isNearBottom() {
   const threshold = 80;
   const distance = els.messages.scrollHeight - els.messages.scrollTop - els.messages.clientHeight;
@@ -148,29 +166,19 @@ function renderAllMessages() {
 
     const meta = document.createElement('div');
     meta.className = 'meta';
-    meta.textContent = `${message.sender} -> ${message.recipient} • ${formatTime(message.receivedAt)} • ${statusLabel(
-      message,
-      mine
-    )}`;
+    const left = document.createElement('span');
+    left.textContent = `${formatTime(message.receivedAt)}${mine ? '' : ` • ${statusLabel(message, mine)}`}`;
+    meta.appendChild(left);
+
+    const tick = statusTicks(message, mine);
+    if (tick) {
+      const right = document.createElement('span');
+      right.className = tick.className;
+      right.textContent = tick.icon;
+      meta.appendChild(right);
+    }
 
     bubble.append(body, meta);
-
-    if (
-      !mine &&
-      message.status !== 'read' &&
-      normalizeId(message.recipient) === myId
-    ) {
-      const readBtn = document.createElement('button');
-      readBtn.className = 'read-btn';
-      readBtn.type = 'button';
-      readBtn.textContent = 'Mark read';
-      readBtn.addEventListener('click', () => {
-        markAsRead(message.id).catch((error) => {
-          console.error(error);
-        });
-      });
-      bubble.appendChild(readBtn);
-    }
 
     row.appendChild(bubble);
     els.messages.appendChild(row);
@@ -185,6 +193,7 @@ function upsertMessage(message) {
   const existing = messagesById.get(message.id) || {};
   messagesById.set(message.id, { ...existing, ...message });
   renderAllMessages();
+  autoReadVisibleMessages().catch(() => {});
 }
 
 function applyMessageStatusUpdate(update) {
@@ -209,6 +218,7 @@ async function loadHistory() {
     messagesById.set(message.id, message);
   });
   renderAllMessages();
+  autoReadVisibleMessages().catch(() => {});
 }
 
 async function fetchRecentIncremental() {
@@ -228,6 +238,9 @@ async function fetchRecentIncremental() {
     }
   });
   if (changed) renderAllMessages();
+  if (changed) {
+    autoReadVisibleMessages().catch(() => {});
+  }
 }
 
 function wsUrl() {
@@ -362,26 +375,63 @@ async function sendMessage(event) {
 }
 
 async function markAsRead(messageId) {
-  const response = await fetch(`/messages/${encodeURIComponent(messageId)}/read`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders()
-    },
-    body: JSON.stringify({
-      reader: els.myId.value.trim() || 'unknown'
-    })
-  });
+  if (inflightReadIds.has(messageId)) return;
+  inflightReadIds.add(messageId);
+  try {
+    const response = await fetch(`/messages/${encodeURIComponent(messageId)}/read`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders()
+      },
+      body: JSON.stringify({
+        reader: els.myId.value.trim() || 'unknown'
+      })
+    });
 
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.error || `Failed to mark read (${response.status})`);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `Failed to mark read (${response.status})`);
+    }
+
+    const payload = await response.json();
+    if (payload.message) {
+      upsertMessage(payload.message);
+    }
+  } finally {
+    inflightReadIds.delete(messageId);
+  }
+}
+
+async function autoReadVisibleMessages() {
+  if (!isForegroundActive()) return;
+
+  const myId = normalizeId(els.myId.value);
+  const unreadForMe = [];
+  for (const message of messagesById.values()) {
+    if (
+      normalizeId(message.recipient) === myId &&
+      message.status !== 'read' &&
+      !inflightReadIds.has(message.id)
+    ) {
+      unreadForMe.push(message.id);
+    }
   }
 
-  const payload = await response.json();
-  if (payload.message) {
-    upsertMessage(payload.message);
+  for (const id of unreadForMe) {
+    try {
+      await markAsRead(id);
+    } catch (error) {
+      console.error(error);
+    }
   }
+}
+
+function startReadSweep() {
+  if (readSweepTimer) return;
+  readSweepTimer = setInterval(() => {
+    autoReadVisibleMessages().catch(() => {});
+  }, READ_SWEEP_MS);
 }
 
 function init() {
@@ -389,6 +439,7 @@ function init() {
   syncTitle();
   savePrefs();
   startLiveSync();
+  startReadSweep();
 
   els.composer.addEventListener('submit', (event) => {
     sendMessage(event).catch((error) => {
@@ -438,10 +489,17 @@ function init() {
 
   window.addEventListener('focus', () => {
     fetchRecentIncremental().catch(() => {});
+    autoReadVisibleMessages().catch(() => {});
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       reconnectNow().catch(() => {
         scheduleReconnect('Resuming...');
       });
+    }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      autoReadVisibleMessages().catch(() => {});
     }
   });
 

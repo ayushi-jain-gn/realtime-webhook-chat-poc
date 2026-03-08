@@ -34,7 +34,7 @@ Open `http://localhost:8080` in your browser.
 - Use **Send as me** to post to `/webhook/outgoing`
 - Use **Simulate incoming** to post to `/webhook/incoming`
 - Messages update in real-time via WebSocket (`/ws`)
-- Incoming messages can be marked as read, and read status syncs instantly across users
+- Read receipts are automatic when recipient tab is in foreground/focused (WhatsApp-like ticks)
 - If `WEBHOOK_TOKEN` is set, enter it in the UI token field (manual reconnect is optional)
 
 ## Optional configuration
