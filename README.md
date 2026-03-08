@@ -7,11 +7,16 @@ Proof-of-concept service that captures incoming/outgoing messages via webhook, p
 - `POST /webhook/incoming`: capture incoming message events
 - `POST /webhook/outgoing`: capture outgoing message events
 - lightweight processing: normalize schema + derive tags (`urgent`, `problem`, etc.)
-- persistence: SQLite (`data/messages.db`)
+- persistence: SQLite (`data/messages.db`) with relational schema:
+  - `users`
+  - `conversations`
+  - `conversation_members`
+  - `messages`
+  - `message_receipts`
 - forwarding:
   - live push to clients via `GET /ws` (WebSocket) and `GET /stream` (SSE fallback)
   - optional forward to another webhook (`FORWARD_WEBHOOK_URL`)
-- query API: `GET /messages?direction=incoming|outgoing&limit=50`
+- query API: `GET /messages?conversationId=<id>&direction=incoming|outgoing&limit=50&before=<cursor>`
 - read-receipts API: `POST /messages/:id/read`
 - health API: `GET /health`
 
@@ -31,8 +36,7 @@ Server starts at `http://localhost:8080` by default.
 
 Open `http://localhost:8080` in your browser.
 
-- Use **Send as me** to post to `/webhook/outgoing`
-- Use **Simulate incoming** to post to `/webhook/incoming`
+- Use **Send** to post from `Me -> Contact` via `/webhook/outgoing`
 - Messages update in real-time via WebSocket (`/ws`)
 - Read receipts are automatic when recipient tab is in foreground/focused (WhatsApp-like ticks)
 - If `WEBHOOK_TOKEN` is set, enter it in the UI token field (manual reconnect is optional)
@@ -195,7 +199,13 @@ curl -X POST http://localhost:8080/webhook/outgoing \
 ## Inspect messages
 
 ```bash
-curl 'http://localhost:8080/messages?limit=20'
+curl 'http://localhost:8080/messages?conversationId=direct:alice:bob&limit=20'
+```
+
+Cursor pagination (older page):
+
+```bash
+curl 'http://localhost:8080/messages?conversationId=direct:alice:bob&limit=20&before=<nextCursor>'
 ```
 
 ## Mark message as read

@@ -80,25 +80,32 @@ async function serveStaticFile(res, fileName, contentType) {
   }
 }
 
+function deriveConversationId(payload, sender, recipient) {
+  if (payload.conversationId) return String(payload.conversationId);
+  const members = [String(sender), String(recipient)].map((id) => id.trim().toLowerCase()).sort();
+  return `direct:${members[0]}:${members[1]}`;
+}
+
 function normalizeMessage(direction, payload) {
   const now = new Date().toISOString();
+  const sender = payload.sender || payload.from || 'unknown';
+  const recipient = payload.recipient || payload.to || 'unknown';
   const text = String(payload.text || payload.body || '').trim();
 
   return {
     id: payload.id || crypto.randomUUID(),
+    conversationId: deriveConversationId(payload, sender, recipient),
     direction,
     channel: payload.channel || 'desktop',
-    sender: payload.sender || payload.from || 'unknown',
-    recipient: payload.recipient || payload.to || 'unknown',
+    sender,
+    recipient,
     text,
     metadata: payload.metadata || {},
     status: payload.status || (direction === 'incoming' ? 'received' : 'sent'),
     providerTimestamp: payload.timestamp || null,
     receivedAt: now,
     processedAt: now,
-    tags: deriveTags(text),
-    readAt: null,
-    readBy: null
+    tags: deriveTags(text)
   };
 }
 
@@ -194,6 +201,7 @@ async function handleWebhook(req, res, direction) {
     sendJson(res, 202, {
       status: 'accepted',
       messageId: message.id,
+      conversationId: message.conversationId,
       forwardResult
     });
   } catch (error) {
@@ -228,10 +236,22 @@ function startHeartbeat() {
 function listMessages(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const direction = url.searchParams.get('direction');
+  const conversationId = url.searchParams.get('conversationId') || '';
   const limit = url.searchParams.get('limit') || 50;
+  const before = url.searchParams.get('before') || '';
 
-  const messages = store.listMessages({ direction, limit });
-  sendJson(res, 200, { count: messages.length, messages });
+  const { messages, nextCursor } = store.listMessages({
+    direction,
+    limit,
+    conversationId,
+    beforeCursor: before
+  });
+
+  sendJson(res, 200, {
+    count: messages.length,
+    nextCursor,
+    messages
+  });
 }
 
 async function markRead(req, res) {
@@ -268,7 +288,8 @@ async function markRead(req, res) {
     id: updated.id,
     status: updated.status,
     readAt: updated.readAt,
-    readBy: updated.readBy
+    readBy: updated.readBy,
+    conversationId: updated.conversationId
   });
 
   sendJson(res, 200, { status: 'ok', message: updated });
@@ -280,7 +301,8 @@ function health(res) {
     uptimeSec: Math.round(process.uptime()),
     sseClients: sseClients.size,
     wsClients: wsClients.size,
-    messageCount: store.count(),
+    messageCount: store.countMessages(),
+    conversationCount: store.countConversations(),
     storage: {
       type: 'sqlite',
       path: store.dbPath

@@ -1,7 +1,6 @@
 const els = {
   messages: document.getElementById('messages'),
   composer: document.getElementById('composer'),
-  direction: document.getElementById('direction'),
   input: document.getElementById('message-input'),
   myId: document.getElementById('my-id'),
   peerId: document.getElementById('peer-id'),
@@ -26,6 +25,8 @@ let reconnectTimer;
 let tokenDebounceTimer;
 let readSweepTimer;
 let retryAttempt = 0;
+let nextCursor = null;
+let loadingOlder = false;
 
 function loadPrefs() {
   try {
@@ -40,12 +41,10 @@ function loadPrefsFromHash() {
   if (!hash) return {};
 
   const params = new URLSearchParams(hash);
-  const direction = params.get('direction');
   return {
     myId: params.get('me') || '',
     peerId: params.get('peer') || '',
-    token: params.get('token') || '',
-    direction: direction === 'incoming' || direction === 'outgoing' ? direction : ''
+    token: params.get('token') || ''
   };
 }
 
@@ -54,7 +53,6 @@ function writePrefsToHash(payload) {
   if (payload.myId) params.set('me', payload.myId);
   if (payload.peerId) params.set('peer', payload.peerId);
   if (payload.token) params.set('token', payload.token);
-  if (payload.direction) params.set('direction', payload.direction);
 
   const nextHash = params.toString();
   const nextUrl = `${window.location.pathname}${window.location.search}${nextHash ? `#${nextHash}` : ''}`;
@@ -65,8 +63,7 @@ function savePrefs() {
   const payload = {
     myId: els.myId.value,
     peerId: els.peerId.value,
-    token: els.token.value,
-    direction: els.direction.value
+    token: els.token.value
   };
 
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -78,13 +75,18 @@ function applyPrefs() {
   if (prefs.myId) els.myId.value = prefs.myId;
   if (prefs.peerId) els.peerId.value = prefs.peerId;
   if (prefs.token) els.token.value = prefs.token;
-  if (prefs.direction === 'incoming' || prefs.direction === 'outgoing') {
-    els.direction.value = prefs.direction;
-  }
 }
 
 function normalizeId(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+function activeConversationId() {
+  const me = normalizeId(els.myId.value);
+  const peer = normalizeId(els.peerId.value);
+  if (!me || !peer) return '';
+  const members = [me, peer].sort();
+  return `direct:${members[0]}:${members[1]}`;
 }
 
 function authHeaders() {
@@ -126,7 +128,7 @@ function statusTicks(message, mine) {
   if (message.status === 'read') {
     return { icon: '✓✓', className: 'ticks ticks-read' };
   }
-  if (message.status === 'received') {
+  if (message.status === 'delivered' || message.status === 'received') {
     return { icon: '✓✓', className: 'ticks ticks-delivered' };
   }
   return { icon: '✓', className: 'ticks ticks-sent' };
@@ -144,7 +146,6 @@ function isNearBottom() {
 
 function renderAllMessages() {
   const shouldStickBottom = isNearBottom();
-
   const sorted = [...messagesById.values()].sort((a, b) => {
     return new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime();
   });
@@ -179,7 +180,6 @@ function renderAllMessages() {
     }
 
     bubble.append(body, meta);
-
     row.appendChild(bubble);
     els.messages.appendChild(row);
   }
@@ -190,6 +190,8 @@ function renderAllMessages() {
 }
 
 function upsertMessage(message) {
+  if (message.conversationId && message.conversationId !== activeConversationId()) return;
+
   const existing = messagesById.get(message.id) || {};
   messagesById.set(message.id, { ...existing, ...message });
   renderAllMessages();
@@ -197,17 +199,27 @@ function upsertMessage(message) {
 }
 
 function applyMessageStatusUpdate(update) {
+  if (update.conversationId && update.conversationId !== activeConversationId()) return;
+
   const existing = messagesById.get(update.id);
   if (!existing) return;
   messagesById.set(update.id, { ...existing, ...update });
   renderAllMessages();
 }
 
-async function loadHistory() {
+function messagesUrl({ limit = 80, before = '' } = {}) {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
   const token = els.token.value.trim();
-  const query = token ? `?limit=250&token=${encodeURIComponent(token)}` : '?limit=250';
-  const response = await fetch(`/messages${query}`, { headers: authHeaders() });
+  const conversationId = activeConversationId();
+  if (token) params.set('token', token);
+  if (conversationId) params.set('conversationId', conversationId);
+  if (before) params.set('before', before);
+  return `/messages?${params.toString()}`;
+}
 
+async function loadHistory() {
+  const response = await fetch(messagesUrl({ limit: 120 }), { headers: authHeaders() });
   if (!response.ok) {
     throw new Error(`Failed to load messages (${response.status})`);
   }
@@ -217,14 +229,38 @@ async function loadHistory() {
   payload.messages.forEach((message) => {
     messagesById.set(message.id, message);
   });
+  nextCursor = payload.nextCursor || null;
   renderAllMessages();
   autoReadVisibleMessages().catch(() => {});
 }
 
+async function loadOlder() {
+  if (!nextCursor || loadingOlder) return;
+  loadingOlder = true;
+  const prevScrollHeight = els.messages.scrollHeight;
+  const prevScrollTop = els.messages.scrollTop;
+
+  try {
+    const response = await fetch(messagesUrl({ limit: 80, before: nextCursor }), { headers: authHeaders() });
+    if (!response.ok) return;
+
+    const payload = await response.json();
+    payload.messages.forEach((message) => {
+      const existing = messagesById.get(message.id) || {};
+      messagesById.set(message.id, { ...existing, ...message });
+    });
+    nextCursor = payload.nextCursor || null;
+    renderAllMessages();
+    const newScrollHeight = els.messages.scrollHeight;
+    const delta = newScrollHeight - prevScrollHeight;
+    els.messages.scrollTop = prevScrollTop + delta;
+  } finally {
+    loadingOlder = false;
+  }
+}
+
 async function fetchRecentIncremental() {
-  const token = els.token.value.trim();
-  const query = token ? `?limit=80&token=${encodeURIComponent(token)}` : '?limit=80';
-  const response = await fetch(`/messages${query}`, { headers: authHeaders() });
+  const response = await fetch(messagesUrl({ limit: 80 }), { headers: authHeaders() });
   if (!response.ok) return;
 
   const payload = await response.json();
@@ -237,8 +273,9 @@ async function fetchRecentIncremental() {
       changed = true;
     }
   });
-  if (changed) renderAllMessages();
+
   if (changed) {
+    renderAllMessages();
     autoReadVisibleMessages().catch(() => {});
   }
 }
@@ -346,11 +383,10 @@ async function sendMessage(event) {
   const text = els.input.value.trim();
   if (!text) return;
 
-  const direction = els.direction.value;
-  const sender = direction === 'outgoing' ? els.myId.value.trim() : els.peerId.value.trim();
-  const recipient = direction === 'outgoing' ? els.peerId.value.trim() : els.myId.value.trim();
+  const sender = els.myId.value.trim();
+  const recipient = els.peerId.value.trim();
 
-  const response = await fetch(`/webhook/${direction}`, {
+  const response = await fetch('/webhook/outgoing', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -360,6 +396,7 @@ async function sendMessage(event) {
       from: sender || 'unknown',
       to: recipient || 'unknown',
       channel: 'desktop-ui',
+      conversationId: activeConversationId(),
       text
     })
   });
@@ -455,18 +492,25 @@ function init() {
     });
   });
 
-  els.myId.addEventListener('input', () => {
-    savePrefs();
-    renderAllMessages();
+  els.messages.addEventListener('scroll', () => {
+    if (els.messages.scrollTop > 40) return;
+    if (!nextCursor || loadingOlder) return;
+    loadOlder().catch((error) => {
+      console.error(error);
+    });
   });
 
-  els.peerId.addEventListener('input', () => {
+  const rejoinConversation = () => {
+    savePrefs();
     syncTitle();
-    savePrefs();
-    renderAllMessages();
-  });
+    reconnectNow().catch((error) => {
+      setConnection('reconnecting', error.message);
+      scheduleReconnect('Conversation switch failed');
+    });
+  };
 
-  els.direction.addEventListener('change', savePrefs);
+  els.myId.addEventListener('input', rejoinConversation);
+  els.peerId.addEventListener('input', rejoinConversation);
 
   els.token.addEventListener('input', () => {
     savePrefs();
