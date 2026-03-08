@@ -1,49 +1,22 @@
 const http = require('http');
 const https = require('https');
-const fs = require('fs');
-const fsp = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
+const { WebSocketServer } = require('ws');
+const { MessageStore } = require('./storage');
 
 const PORT = Number(process.env.PORT || 8080);
 const HOST = process.env.HOST || '0.0.0.0';
 const FORWARD_WEBHOOK_URL = process.env.FORWARD_WEBHOOK_URL || '';
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || '';
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
-const STORE_FILE = path.join(DATA_DIR, 'messages.ndjson');
 const PUBLIC_DIR = path.resolve(__dirname, '..', 'public');
-
-const MESSAGE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const SSE_HEARTBEAT_MS = 15000;
-const inMemoryMessages = [];
+const WS_OPEN = 1;
+
+const store = new MessageStore(DATA_DIR);
 const sseClients = new Set();
-
-async function ensureStorage() {
-  await fsp.mkdir(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(STORE_FILE)) {
-    await fsp.writeFile(STORE_FILE, '', 'utf8');
-    return;
-  }
-
-  const content = await fsp.readFile(STORE_FILE, 'utf8');
-  const lines = content.split('\n').filter(Boolean);
-  for (const line of lines.slice(-1000)) {
-    try {
-      const message = JSON.parse(line);
-      inMemoryMessages.push(message);
-    } catch {
-      // Ignore malformed lines in POC mode.
-    }
-  }
-  pruneOldMessages();
-}
-
-function pruneOldMessages() {
-  const cutoff = Date.now() - MESSAGE_MAX_AGE_MS;
-  while (inMemoryMessages.length && new Date(inMemoryMessages[0].receivedAt).getTime() < cutoff) {
-    inMemoryMessages.shift();
-  }
-}
+const wsClients = new Set();
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -59,11 +32,7 @@ function readJsonBody(req) {
 
     req.on('end', () => {
       try {
-        if (!data) {
-          resolve({});
-          return;
-        }
-        resolve(JSON.parse(data));
+        resolve(data ? JSON.parse(data) : {});
       } catch (error) {
         reject(error);
       }
@@ -88,23 +57,19 @@ function unauthorized(res) {
 }
 
 function isAuthorized(req, requestUrl) {
-  if (!WEBHOOK_TOKEN) {
-    return true;
-  }
+  if (!WEBHOOK_TOKEN) return true;
 
   const authHeader = req.headers.authorization || '';
-  if (authHeader === `Bearer ${WEBHOOK_TOKEN}`) {
-    return true;
-  }
+  if (authHeader === `Bearer ${WEBHOOK_TOKEN}`) return true;
 
   const token = requestUrl?.searchParams.get('token') || '';
   return token === WEBHOOK_TOKEN;
 }
 
 async function serveStaticFile(res, fileName, contentType) {
-  const filePath = path.join(PUBLIC_DIR, fileName);
+  const fs = require('fs/promises');
   try {
-    const content = await fsp.readFile(filePath);
+    const content = await fs.readFile(path.join(PUBLIC_DIR, fileName));
     res.writeHead(200, {
       'Content-Type': contentType,
       'Content-Length': content.length
@@ -131,7 +96,9 @@ function normalizeMessage(direction, payload) {
     providerTimestamp: payload.timestamp || null,
     receivedAt: now,
     processedAt: now,
-    tags: deriveTags(text)
+    tags: deriveTags(text),
+    readAt: null,
+    readBy: null
   };
 }
 
@@ -147,16 +114,17 @@ function deriveTags(text) {
   return tags;
 }
 
-async function persistMessage(message) {
-  inMemoryMessages.push(message);
-  pruneOldMessages();
-  await fsp.appendFile(STORE_FILE, `${JSON.stringify(message)}\n`, 'utf8');
-}
-
-function broadcastMessage(message) {
-  const event = `event: message\ndata: ${JSON.stringify(message)}\n\n`;
+function broadcastEvent(event, payload) {
+  const sse = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
   for (const client of sseClients) {
-    client.write(event);
+    client.write(sse);
+  }
+
+  const ws = JSON.stringify({ event, data: payload });
+  for (const client of wsClients) {
+    if (client.readyState === WS_OPEN) {
+      client.send(ws);
+    }
   }
 }
 
@@ -219,8 +187,8 @@ async function handleWebhook(req, res, direction) {
   const message = normalizeMessage(direction, payload);
 
   try {
-    await persistMessage(message);
-    broadcastMessage(message);
+    store.addMessage(message);
+    broadcastEvent('message', message);
     const forwardResult = await forwardToWebhook(message);
 
     sendJson(res, 202, {
@@ -253,25 +221,57 @@ function handleSse(req, res) {
 
 function startHeartbeat() {
   setInterval(() => {
-    const heartbeat = `event: ping\ndata: ${JSON.stringify({ ts: new Date().toISOString() })}\n\n`;
-    for (const client of sseClients) {
-      client.write(heartbeat);
-    }
+    broadcastEvent('ping', { ts: new Date().toISOString() });
   }, SSE_HEARTBEAT_MS);
 }
 
 function listMessages(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const direction = url.searchParams.get('direction');
-  const limit = Math.min(Number(url.searchParams.get('limit') || 50), 500);
+  const limit = url.searchParams.get('limit') || 50;
 
-  let messages = inMemoryMessages;
-  if (direction === 'incoming' || direction === 'outgoing') {
-    messages = messages.filter((msg) => msg.direction === direction);
+  const messages = store.listMessages({ direction, limit });
+  sendJson(res, 200, { count: messages.length, messages });
+}
+
+async function markRead(req, res) {
+  const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+  if (!isAuthorized(req, requestUrl)) {
+    unauthorized(res);
+    return;
   }
 
-  const recentMessages = messages.slice(-limit).reverse();
-  sendJson(res, 200, { count: recentMessages.length, messages: recentMessages });
+  const match = requestUrl.pathname.match(/^\/messages\/([^/]+)\/read$/);
+  if (!match) {
+    sendJson(res, 404, { error: 'Route not found' });
+    return;
+  }
+
+  let payload;
+  try {
+    payload = await readJsonBody(req);
+  } catch (error) {
+    sendJson(res, 400, { error: `Invalid JSON payload: ${error.message}` });
+    return;
+  }
+
+  const messageId = decodeURIComponent(match[1]);
+  const reader = String(payload.reader || 'unknown');
+  const updated = store.markAsRead(messageId, reader);
+
+  if (!updated) {
+    sendJson(res, 404, { error: 'Message not found' });
+    return;
+  }
+
+  broadcastEvent('message_status', {
+    id: updated.id,
+    status: updated.status,
+    readAt: updated.readAt,
+    readBy: updated.readBy
+  });
+
+  sendJson(res, 200, { status: 'ok', message: updated });
 }
 
 function health(res) {
@@ -279,13 +279,40 @@ function health(res) {
     status: 'ok',
     uptimeSec: Math.round(process.uptime()),
     sseClients: sseClients.size,
-    bufferedMessages: inMemoryMessages.length
+    wsClients: wsClients.size,
+    messageCount: store.count(),
+    storage: {
+      type: 'sqlite',
+      path: store.dbPath
+    }
   });
 }
 
 async function start() {
-  await ensureStorage();
+  await store.init();
   startHeartbeat();
+
+  const wss = new WebSocketServer({ noServer: true });
+
+  wss.on('connection', (socket) => {
+    wsClients.add(socket);
+    socket.send(JSON.stringify({ event: 'ready', data: { connectedAt: new Date().toISOString() } }));
+
+    socket.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(String(raw));
+        if (msg?.type === 'ping') {
+          socket.send(JSON.stringify({ event: 'pong', data: { ts: new Date().toISOString() } }));
+        }
+      } catch {
+        // Ignore invalid ws payloads in POC mode.
+      }
+    });
+
+    socket.on('close', () => {
+      wsClients.delete(socket);
+    });
+  });
 
   const server = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url, `http://${req.headers.host}`);
@@ -330,6 +357,11 @@ async function start() {
       return;
     }
 
+    if (req.method === 'POST' && pathname.match(/^\/messages\/[^/]+\/read$/)) {
+      await markRead(req, res);
+      return;
+    }
+
     if (req.method === 'GET' && pathname === '/stream') {
       if (!isAuthorized(req, requestUrl)) {
         unauthorized(res);
@@ -342,9 +374,32 @@ async function start() {
     sendJson(res, 404, { error: 'Route not found' });
   });
 
+  server.on('upgrade', (req, socket, head) => {
+    const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+    if (requestUrl.pathname !== '/ws') {
+      socket.destroy();
+      return;
+    }
+
+    if (!isAuthorized(req, requestUrl)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req);
+    });
+  });
+
   server.listen(PORT, HOST, () => {
     // eslint-disable-next-line no-console
     console.log(`Realtime message POC listening on http://${HOST}:${PORT}`);
+  });
+
+  process.on('SIGINT', () => {
+    store.close();
+    process.exit(0);
   });
 }
 

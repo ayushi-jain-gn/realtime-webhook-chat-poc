@@ -156,6 +156,18 @@ select {
   color: var(--muted);
 }
 
+.read-btn {
+  margin-top: 8px;
+  border: 0;
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  background: #d9eefc;
+  color: #12476b;
+  cursor: pointer;
+}
+
 .composer {
   display: grid;
   grid-template-columns: 170px minmax(0, 1fr) auto;
