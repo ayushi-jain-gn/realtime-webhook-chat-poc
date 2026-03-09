@@ -307,6 +307,14 @@ function handleMe(req, res, sessionUser) {
   });
 }
 
+function handleAuthStatus(req, res) {
+  const userCount = store.countUsers();
+  sendJson(res, 200, {
+    userCount,
+    hasUsers: userCount > 0
+  });
+}
+
 function handleLogout(req, res, sessionUser) {
   store.deleteSession(sessionUser.token);
   sendJson(res, 200, { status: 'ok' });
@@ -618,6 +626,11 @@ async function start() {
     if (req.method === 'GET' && pathname === '/auth/me') {
       if (!sessionUser) return unauthorized(res);
       handleMe(req, res, sessionUser);
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/auth/status') {
+      handleAuthStatus(req, res);
       return;
     }
 

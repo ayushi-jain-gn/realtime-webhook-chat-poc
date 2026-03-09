@@ -1,11 +1,16 @@
 const els = {
   authView: document.getElementById('auth-view'),
   chatView: document.getElementById('chat-view'),
+  authModeHint: document.getElementById('auth-mode-hint'),
+  authModeLogin: document.getElementById('auth-mode-login'),
+  authModeRegister: document.getElementById('auth-mode-register'),
   authForm: document.getElementById('auth-form'),
-  registerBtn: document.getElementById('register-btn'),
+  authDisplayGroup: document.getElementById('auth-display-group'),
+  authSubmitBtn: document.getElementById('auth-submit-btn'),
   authUser: document.getElementById('auth-user'),
   authDisplay: document.getElementById('auth-display'),
   authPass: document.getElementById('auth-pass'),
+  authPassToggle: document.getElementById('auth-pass-toggle'),
   authStatus: document.getElementById('auth-status'),
   currentUser: document.getElementById('current-user'),
   logoutBtn: document.getElementById('logout-btn'),
@@ -41,7 +46,8 @@ const state = {
   liveSyncTimer: null,
   reconnectTimer: null,
   readSweepTimer: null,
-  retryAttempt: 0
+  retryAttempt: 0,
+  authMode: 'login'
 };
 
 function saveSession() {
@@ -450,10 +456,11 @@ async function createOrOpenDirect(peerInput) {
   await openConversation(conversationId, peerId);
 }
 
-function showAuth(status = '') {
+function showAuth(status = '', mode = 'login') {
   els.authView.classList.remove('hidden');
   els.chatView.classList.add('hidden');
   els.authStatus.textContent = status;
+  setAuthMode(mode);
 }
 
 function showChat() {
@@ -462,10 +469,32 @@ function showChat() {
   els.currentUser.textContent = `@${state.user.userId}`;
 }
 
+function setAuthMode(mode) {
+  state.authMode = mode === 'register' ? 'register' : 'login';
+  const isRegister = state.authMode === 'register';
+
+  els.authModeLogin.classList.toggle('active', !isRegister);
+  els.authModeRegister.classList.toggle('active', isRegister);
+  els.authDisplayGroup.classList.toggle('hidden', !isRegister);
+  els.authSubmitBtn.textContent = isRegister ? 'Create account' : 'Login';
+  els.authModeHint.textContent = isRegister
+    ? 'Create your account. After registering, sign in from Login.'
+    : 'Sign in to continue.';
+}
+
 async function bootstrapFromSession() {
   const session = loadSession();
   if (!session.token) {
-    showAuth();
+    try {
+      const status = await api('/auth/status');
+      if (!status.hasUsers) {
+        showAuth('No users found. Please register first.', 'register');
+      } else {
+        showAuth('', 'login');
+      }
+    } catch {
+      showAuth('', 'login');
+    }
     return;
   }
 
@@ -490,15 +519,40 @@ async function bootstrapFromSession() {
     state.token = '';
     state.user = null;
     clearSession();
-    showAuth('Session expired. Please login again.');
+    showAuth('Session expired. Please login again.', 'login');
   }
 }
 
 function wireEvents() {
+  els.authPassToggle.addEventListener('click', () => {
+    const showing = els.authPass.type === 'text';
+    els.authPass.type = showing ? 'password' : 'text';
+    els.authPassToggle.textContent = showing ? '👁' : '🙈';
+    els.authPassToggle.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+    els.authPassToggle.setAttribute('title', showing ? 'Show password' : 'Hide password');
+  });
+
   els.authForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     const userId = normalizeId(els.authUser.value);
     const password = els.authPass.value;
+
+    if (state.authMode === 'register') {
+      const displayName = els.authDisplay.value.trim();
+      try {
+        await api('/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId, password, displayName })
+        });
+        els.authPass.value = '';
+        setAuthMode('login');
+        showAuth('Registration successful. Please login.', 'login');
+      } catch (error) {
+        showAuth(error.message, 'register');
+      }
+      return;
+    }
 
     try {
       const payload = await api('/auth/login', {
@@ -515,32 +569,18 @@ function wireEvents() {
       await connectRealtime();
       startTimers();
     } catch (error) {
-      showAuth(error.message);
+      showAuth(error.message, 'login');
     }
   });
 
-  els.registerBtn.addEventListener('click', async () => {
-    const userId = normalizeId(els.authUser.value);
-    const password = els.authPass.value;
-    const displayName = els.authDisplay.value.trim();
+  els.authModeLogin.addEventListener('click', () => {
+    setAuthMode('login');
+    els.authStatus.textContent = '';
+  });
 
-    try {
-      const payload = await api('/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, password, displayName })
-      });
-
-      state.token = payload.session.token;
-      state.user = payload.user;
-      saveSession();
-      showChat();
-      await refreshConversations();
-      await connectRealtime();
-      startTimers();
-    } catch (error) {
-      showAuth(error.message);
-    }
+  els.authModeRegister.addEventListener('click', () => {
+    setAuthMode('register');
+    els.authStatus.textContent = '';
   });
 
   els.logoutBtn.addEventListener('click', async () => {

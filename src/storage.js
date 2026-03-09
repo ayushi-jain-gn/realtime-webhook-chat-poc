@@ -171,6 +171,7 @@ class MessageStore {
 
     this.countMessagesStmt = this.db.prepare('SELECT COUNT(1) AS count FROM messages');
     this.countConversationsStmt = this.db.prepare('SELECT COUNT(1) AS count FROM conversations');
+    this.countUsersStmt = this.db.prepare('SELECT COUNT(1) AS count FROM users');
 
     this.addMessageTx = this.db.transaction((message) => {
       const now = new Date().toISOString();
@@ -433,6 +434,10 @@ class MessageStore {
 
   countConversations() {
     return this.countConversationsStmt.get().count;
+  }
+
+  countUsers() {
+    return this.countUsersStmt.get().count;
   }
 
   close() {

@@ -11,25 +11,32 @@
       <section id="auth-view" class="auth-view">
         <div class="auth-card">
           <h1>Realtime Chat</h1>
-          <p>Sign in to continue.</p>
+          <p id="auth-mode-hint">Sign in to continue.</p>
+
+          <div class="auth-mode-row">
+            <button id="auth-mode-login" type="button" class="mode-btn active">Login</button>
+            <button id="auth-mode-register" type="button" class="mode-btn">Register</button>
+          </div>
 
           <form id="auth-form" class="auth-form">
             <div class="form-group">
               <label for="auth-user">Username</label>
-              <input id="auth-user" placeholder="akshay" required />
+              <input id="auth-user" placeholder="Username" required />
             </div>
-            <div class="form-group">
+            <div id="auth-display-group" class="form-group hidden">
               <label for="auth-display">Display name (for register)</label>
-              <input id="auth-display" placeholder="Akshay Jain" />
+              <input id="auth-display" placeholder="Display name" />
             </div>
             <div class="form-group">
               <label for="auth-pass">Password</label>
-              <input id="auth-pass" type="password" placeholder="••••••••" required />
+              <div class="password-wrap">
+                <input id="auth-pass" type="password" placeholder="******" required />
+                <button id="auth-pass-toggle" class="pass-toggle" type="button" aria-label="Show password" title="Show password">👁</button>
+              </div>
             </div>
 
             <div class="auth-actions">
-              <button type="submit" class="btn">Login</button>
-              <button id="register-btn" type="button" class="btn secondary">Register</button>
+              <button id="auth-submit-btn" type="submit" class="btn">Login</button>
             </div>
           </form>
 
