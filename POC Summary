@@ -193,7 +193,6 @@ Known practical note:
 
 **14) Important Fixes Added During Iteration**
 1. Legacy DB schema migration handling:
-   - Old incompatible DB gets renamed to `messages.legacy-<timestamp>.db`.
    - New schema DB is created.
 2. Crash prevention for missing peer user in direct chat creation:
    - Backend now returns `User not found: <peerId>` instead of crashing.
@@ -204,46 +203,3 @@ Known practical note:
 
 ---
 
-**15) How to Demo to Team Lead (Suggested Script)**
-1. Start app:
-```bash
-npm install
-npm start
-```
-2. Start public tunnel:
-```bash
-WEBHOOK_TOKEN=shared-secret npm run share:cloudflared
-```
-3. Open public URL in 2 browsers/devices.
-4. Register 2 users.
-5. Login both users.
-6. Open direct chat each way.
-7. Send messages and show realtime updates.
-8. Background one client and show read tick behavior.
-9. Foreground it and show read ticks turn blue.
-10. Scroll up to load older messages.
-11. Open dev console/network and show protected endpoints requiring token.
-12. Show webhook path with `WEBHOOK_TOKEN` and explain integration extension.
-
----
-
-**16) Current Limitations (Good to Mention Transparently)**
-1. Session tokens are DB-backed but not rotated/refresh-token style.
-2. Password policy is basic (POC-level).
-3. No email/OTP verification.
-4. No group chats yet (direct-conversation flow only in UI).
-5. No media/file attachments.
-6. No full observability stack (metrics, tracing dashboards).
-7. No production-grade deployment pipeline in repo yet.
-
----
-
-**17) Strong Next Steps (if your lead asks)**
-1. Add group conversations and member management.
-2. Add JWT + refresh token model.
-3. Add audit logs and structured telemetry.
-4. Add message search and server-side filtering.
-5. Add push notifications.
-6. Add CI tests for auth, authorization, and pagination invariants.
-
-If you want, I can also prepare a concise “Team Lead demo brief” (1-page format) from this, with architecture diagram and talking points.
