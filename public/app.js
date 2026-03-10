@@ -1,133 +1,102 @@
 const els = {
-  messages: document.getElementById('messages'),
-  composer: document.getElementById('composer'),
-  input: document.getElementById('message-input'),
-  myId: document.getElementById('my-id'),
-  peerId: document.getElementById('peer-id'),
-  token: document.getElementById('token'),
+  authView: document.getElementById('auth-view'),
+  chatView: document.getElementById('chat-view'),
+  authModeHint: document.getElementById('auth-mode-hint'),
+  authModeLogin: document.getElementById('auth-mode-login'),
+  authModeRegister: document.getElementById('auth-mode-register'),
+  authForm: document.getElementById('auth-form'),
+  authDisplayGroup: document.getElementById('auth-display-group'),
+  authSubmitBtn: document.getElementById('auth-submit-btn'),
+  authUser: document.getElementById('auth-user'),
+  authDisplay: document.getElementById('auth-display'),
+  authPass: document.getElementById('auth-pass'),
+  authPassToggle: document.getElementById('auth-pass-toggle'),
+  authStatus: document.getElementById('auth-status'),
+  currentUser: document.getElementById('current-user'),
+  logoutBtn: document.getElementById('logout-btn'),
+  newChatForm: document.getElementById('new-chat-form'),
+  newChatPeer: document.getElementById('new-chat-peer'),
+  chatList: document.getElementById('chat-list'),
+  chatTitle: document.getElementById('chat-title'),
+  backBtn: document.getElementById('back-btn'),
+  reconnectBtn: document.getElementById('reconnect-btn'),
   statusText: document.getElementById('connection-status-text'),
   statusDot: document.getElementById('status-dot'),
-  title: document.getElementById('chat-title'),
-  connectBtn: document.getElementById('connect-btn')
+  messages: document.getElementById('messages'),
+  composer: document.getElementById('composer'),
+  input: document.getElementById('message-input')
 };
 
-const STORAGE_KEY = 'realtime-chat-poc:v1';
+const SESSION_STORAGE_KEY = 'realtime-chat-session:v1';
 const LIVE_SYNC_MS = 1200;
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 15000;
 const READ_SWEEP_MS = 1200;
 
-const messagesById = new Map();
-const inflightReadIds = new Set();
-let socket;
-let liveSyncTimer;
-let reconnectTimer;
-let tokenDebounceTimer;
-let readSweepTimer;
-let retryAttempt = 0;
-let nextCursor = null;
-let loadingOlder = false;
+const state = {
+  token: '',
+  user: null,
+  activeConversationId: '',
+  activePeerId: '',
+  conversations: [],
+  messagesById: new Map(),
+  nextCursor: null,
+  loadingOlder: false,
+  inflightReadIds: new Set(),
+  socket: null,
+  liveSyncTimer: null,
+  reconnectTimer: null,
+  readSweepTimer: null,
+  retryAttempt: 0,
+  authMode: 'login'
+};
 
-function loadPrefs() {
+function saveSession() {
+  localStorage.setItem(
+    SESSION_STORAGE_KEY,
+    JSON.stringify({ token: state.token, activeConversationId: state.activeConversationId, activePeerId: state.activePeerId })
+  );
+}
+
+function loadSession() {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    return JSON.parse(localStorage.getItem(SESSION_STORAGE_KEY) || '{}');
   } catch {
     return {};
   }
 }
 
-function loadPrefsFromHash() {
-  const hash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : '';
-  if (!hash) return {};
-
-  const params = new URLSearchParams(hash);
-  return {
-    myId: params.get('me') || '',
-    peerId: params.get('peer') || '',
-    token: params.get('token') || ''
-  };
-}
-
-function writePrefsToHash(payload) {
-  const params = new URLSearchParams();
-  if (payload.myId) params.set('me', payload.myId);
-  if (payload.peerId) params.set('peer', payload.peerId);
-  if (payload.token) params.set('token', payload.token);
-
-  const nextHash = params.toString();
-  const nextUrl = `${window.location.pathname}${window.location.search}${nextHash ? `#${nextHash}` : ''}`;
-  window.history.replaceState(null, '', nextUrl);
-}
-
-function savePrefs() {
-  const payload = {
-    myId: els.myId.value,
-    peerId: els.peerId.value,
-    token: els.token.value
-  };
-
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  writePrefsToHash(payload);
-}
-
-function applyPrefs() {
-  const prefs = { ...loadPrefs(), ...loadPrefsFromHash() };
-  if (prefs.myId) els.myId.value = prefs.myId;
-  if (prefs.peerId) els.peerId.value = prefs.peerId;
-  if (prefs.token) els.token.value = prefs.token;
-}
-
-function normalizeId(value) {
-  return String(value || '').trim().toLowerCase();
-}
-
-function activeConversationId() {
-  const me = normalizeId(els.myId.value);
-  const peer = normalizeId(els.peerId.value);
-  if (!me || !peer) return '';
-  const members = [me, peer].sort();
-  return `direct:${members[0]}:${members[1]}`;
+function clearSession() {
+  localStorage.removeItem(SESSION_STORAGE_KEY);
 }
 
 function authHeaders() {
-  const token = els.token.value.trim();
-  if (!token) return {};
-  return { Authorization: `Bearer ${token}` };
+  return state.token ? { Authorization: `Bearer ${state.token}` } : {};
 }
 
-function setConnection(state, text) {
-  if (els.statusText) {
-    els.statusText.textContent = text;
-  }
-  if (els.statusDot) {
-    els.statusDot.className = `status-dot ${state}`;
-  }
+function normalizeId(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
 }
 
-function syncTitle() {
-  els.title.textContent = els.peerId.value.trim() || 'Contact';
+function directConversationId(userA, userB) {
+  const members = [normalizeId(userA), normalizeId(userB)].sort();
+  return `direct:${members[0]}:${members[1]}`;
 }
 
-function formatTime(isoString) {
-  if (!isoString) return '';
-  return new Date(isoString).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function setConnection(stateName, text) {
+  els.statusText.textContent = text;
+  els.statusDot.className = `status-dot ${stateName}`;
 }
 
-function statusLabel(message, mine) {
-  if (message.status === 'read') {
-    return message.readBy ? `read by ${message.readBy}` : 'read';
-  }
-  if (mine) {
-    return message.status || 'sent';
-  }
-  return message.status || 'received';
+function formatTime(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function statusTicks(message, mine) {
+function statusTicks(message) {
+  const mine = normalizeId(message.sender) === normalizeId(state.user?.userId);
   if (!mine) return null;
-  if (message.status === 'read') {
-    return { icon: '✓✓', className: 'ticks ticks-read' };
-  }
+  if (message.status === 'read') return { icon: '✓✓', className: 'ticks ticks-read' };
   if (message.status === 'delivered' || message.status === 'received') {
     return { icon: '✓✓', className: 'ticks ticks-delivered' };
   }
@@ -144,17 +113,56 @@ function isNearBottom() {
   return distance <= threshold;
 }
 
-function renderAllMessages() {
+function renderChatList() {
+  els.chatList.innerHTML = '';
+
+  for (const conv of state.conversations) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = `chat-item ${conv.conversationId === state.activeConversationId ? 'active' : ''}`;
+    row.dataset.conversationId = conv.conversationId;
+
+    const title = document.createElement('div');
+    title.className = 'chat-item-title';
+    title.textContent = conv.peerId || conv.conversationId;
+
+    const preview = document.createElement('div');
+    preview.className = 'chat-item-preview';
+    preview.textContent = conv.lastMessage?.text || 'No messages yet';
+
+    const meta = document.createElement('div');
+    meta.className = 'chat-item-meta';
+    meta.textContent = conv.lastMessage?.at ? formatTime(conv.lastMessage.at) : '';
+
+    if (conv.unreadCount > 0) {
+      const badge = document.createElement('span');
+      badge.className = 'chat-badge';
+      badge.textContent = String(conv.unreadCount);
+      meta.appendChild(badge);
+    }
+
+    row.append(title, preview, meta);
+    row.addEventListener('click', () => {
+      openConversation(conv.conversationId, conv.peerId).catch((error) => {
+        console.error(error);
+      });
+    });
+
+    els.chatList.appendChild(row);
+  }
+}
+
+function renderMessages() {
   const shouldStickBottom = isNearBottom();
-  const sorted = [...messagesById.values()].sort((a, b) => {
-    return new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime();
-  });
+  const sorted = [...state.messagesById.values()].sort(
+    (a, b) => new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime()
+  );
 
   els.messages.innerHTML = '';
-  const myId = normalizeId(els.myId.value);
+  const me = normalizeId(state.user?.userId);
 
   for (const message of sorted) {
-    const mine = normalizeId(message.sender) === myId;
+    const mine = normalizeId(message.sender) === me;
 
     const row = document.createElement('article');
     row.className = `message ${mine ? 'outgoing' : 'incoming'}`;
@@ -167,11 +175,12 @@ function renderAllMessages() {
 
     const meta = document.createElement('div');
     meta.className = 'meta';
+
     const left = document.createElement('span');
-    left.textContent = `${formatTime(message.receivedAt)}${mine ? '' : ` • ${statusLabel(message, mine)}`}`;
+    left.textContent = formatTime(message.receivedAt);
     meta.appendChild(left);
 
-    const tick = statusTicks(message, mine);
+    const tick = statusTicks(message);
     if (tick) {
       const right = document.createElement('span');
       right.className = tick.className;
@@ -189,127 +198,33 @@ function renderAllMessages() {
   }
 }
 
-function upsertMessage(message) {
-  if (message.conversationId && message.conversationId !== activeConversationId()) return;
-
-  const existing = messagesById.get(message.id) || {};
-  messagesById.set(message.id, { ...existing, ...message });
-  renderAllMessages();
-  autoReadVisibleMessages().catch(() => {});
-}
-
-function applyMessageStatusUpdate(update) {
-  if (update.conversationId && update.conversationId !== activeConversationId()) return;
-
-  const existing = messagesById.get(update.id);
-  if (!existing) return;
-  messagesById.set(update.id, { ...existing, ...update });
-  renderAllMessages();
-}
-
-function messagesUrl({ limit = 80, before = '' } = {}) {
-  const params = new URLSearchParams();
-  params.set('limit', String(limit));
-  const token = els.token.value.trim();
-  const conversationId = activeConversationId();
-  if (token) params.set('token', token);
-  if (conversationId) params.set('conversationId', conversationId);
-  if (before) params.set('before', before);
-  return `/messages?${params.toString()}`;
-}
-
-async function loadHistory() {
-  const response = await fetch(messagesUrl({ limit: 120 }), { headers: authHeaders() });
-  if (!response.ok) {
-    throw new Error(`Failed to load messages (${response.status})`);
-  }
-
-  const payload = await response.json();
-  messagesById.clear();
-  payload.messages.forEach((message) => {
-    messagesById.set(message.id, message);
-  });
-  nextCursor = payload.nextCursor || null;
-  renderAllMessages();
-  autoReadVisibleMessages().catch(() => {});
-}
-
-async function loadOlder() {
-  if (!nextCursor || loadingOlder) return;
-  loadingOlder = true;
-  const prevScrollHeight = els.messages.scrollHeight;
-  const prevScrollTop = els.messages.scrollTop;
-
-  try {
-    const response = await fetch(messagesUrl({ limit: 80, before: nextCursor }), { headers: authHeaders() });
-    if (!response.ok) return;
-
-    const payload = await response.json();
-    payload.messages.forEach((message) => {
-      const existing = messagesById.get(message.id) || {};
-      messagesById.set(message.id, { ...existing, ...message });
-    });
-    nextCursor = payload.nextCursor || null;
-    renderAllMessages();
-    const newScrollHeight = els.messages.scrollHeight;
-    const delta = newScrollHeight - prevScrollHeight;
-    els.messages.scrollTop = prevScrollTop + delta;
-  } finally {
-    loadingOlder = false;
-  }
-}
-
-async function fetchRecentIncremental() {
-  const response = await fetch(messagesUrl({ limit: 80 }), { headers: authHeaders() });
-  if (!response.ok) return;
-
-  const payload = await response.json();
-  let changed = false;
-  payload.messages.forEach((message) => {
-    const existing = messagesById.get(message.id) || {};
-    const merged = { ...existing, ...message };
-    if (JSON.stringify(existing) !== JSON.stringify(merged)) {
-      messagesById.set(message.id, merged);
-      changed = true;
-    }
-  });
-
-  if (changed) {
-    renderAllMessages();
-    autoReadVisibleMessages().catch(() => {});
-  }
-}
-
 function wsUrl() {
-  const token = els.token.value.trim();
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const base = `${protocol}//${window.location.host}/ws`;
-  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  return `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(state.token)}`;
 }
 
 function closeSocket() {
-  if (socket) {
-    socket.onclose = null;
-    socket.onerror = null;
-    socket.close();
-    socket = undefined;
-  }
+  if (!state.socket) return;
+  state.socket.onclose = null;
+  state.socket.onerror = null;
+  state.socket.close();
+  state.socket = null;
 }
 
 function scheduleReconnect(reason = 'Reconnecting...') {
-  if (reconnectTimer) return;
+  if (state.reconnectTimer) return;
 
-  const delay = Math.min(RETRY_BASE_MS * 2 ** retryAttempt, RETRY_MAX_MS);
+  const delay = Math.min(RETRY_BASE_MS * 2 ** state.retryAttempt, RETRY_MAX_MS);
   const jitter = Math.floor(Math.random() * 400);
   const waitMs = delay + jitter;
-  retryAttempt += 1;
+  state.retryAttempt += 1;
 
   setConnection('reconnecting', `${reason} retry in ${Math.round(waitMs / 1000)}s`);
 
-  reconnectTimer = setTimeout(async () => {
-    reconnectTimer = undefined;
+  state.reconnectTimer = setTimeout(async () => {
+    state.reconnectTimer = null;
     try {
-      await reconnectNow();
+      await connectRealtime();
     } catch (error) {
       setConnection('reconnecting', error.message);
       scheduleReconnect('Reconnect failed');
@@ -317,145 +232,160 @@ function scheduleReconnect(reason = 'Reconnecting...') {
   }, waitMs);
 }
 
-function connectRealtime() {
+function upsertIncomingMessage(message) {
+  if (message.conversationId !== state.activeConversationId) return;
+  const existing = state.messagesById.get(message.id) || {};
+  state.messagesById.set(message.id, { ...existing, ...message });
+  renderMessages();
+  autoReadVisibleMessages().catch(() => {});
+}
+
+function applyStatusUpdate(update) {
+  if (update.conversationId !== state.activeConversationId) return;
+  const existing = state.messagesById.get(update.id);
+  if (!existing) return;
+  state.messagesById.set(update.id, { ...existing, ...update });
+  renderMessages();
+}
+
+async function connectRealtime() {
   closeSocket();
 
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = undefined;
+  if (state.reconnectTimer) {
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
   }
 
   setConnection('connecting', 'Connecting...');
-  socket = new WebSocket(wsUrl());
+  state.socket = new WebSocket(wsUrl());
 
-  socket.onopen = () => {
-    retryAttempt = 0;
+  state.socket.onopen = () => {
+    state.retryAttempt = 0;
     setConnection('connected', 'Connected');
-    fetchRecentIncremental().catch(() => {});
   };
 
-  socket.onmessage = (event) => {
+  state.socket.onmessage = (event) => {
     try {
       const payload = JSON.parse(event.data);
       if (payload.event === 'message') {
-        upsertMessage(payload.data);
+        upsertIncomingMessage(payload.data);
+        refreshConversations().catch(() => {});
       } else if (payload.event === 'message_status') {
-        applyMessageStatusUpdate(payload.data);
+        applyStatusUpdate(payload.data);
+        refreshConversations().catch(() => {});
       }
     } catch (error) {
       console.error(error);
     }
   };
 
-  socket.onerror = () => {
+  state.socket.onerror = () => {
     setConnection('disconnected', 'Disconnected');
   };
 
-  socket.onclose = () => {
+  state.socket.onclose = () => {
     setConnection('disconnected', 'Disconnected');
     scheduleReconnect('Disconnected');
   };
 }
 
-async function reconnectNow() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = undefined;
-  }
-
-  retryAttempt = 0;
-  await loadHistory();
-  connectRealtime();
-}
-
-function startLiveSync() {
-  if (liveSyncTimer) return;
-  liveSyncTimer = setInterval(() => {
-    fetchRecentIncremental().catch(() => {
-      // Keep polling as fallback when websocket path is unstable.
-    });
-  }, LIVE_SYNC_MS);
-}
-
-async function sendMessage(event) {
-  event.preventDefault();
-
-  const text = els.input.value.trim();
-  if (!text) return;
-
-  const sender = els.myId.value.trim();
-  const recipient = els.peerId.value.trim();
-
-  const response = await fetch('/webhook/outgoing', {
-    method: 'POST',
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
     headers: {
-      'Content-Type': 'application/json',
+      ...(options.headers || {}),
       ...authHeaders()
-    },
-    body: JSON.stringify({
-      from: sender || 'unknown',
-      to: recipient || 'unknown',
-      channel: 'desktop-ui',
-      conversationId: activeConversationId(),
-      text
-    })
+    }
   });
 
+  const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    alert(payload.error || `Failed to send (${response.status})`);
-    return;
+    const message = payload.error || `Request failed (${response.status})`;
+    throw new Error(message);
+  }
+  return payload;
+}
+
+async function refreshConversations() {
+  const payload = await api('/conversations');
+  state.conversations = payload.conversations || [];
+  renderChatList();
+
+  if (!state.activeConversationId && state.conversations.length) {
+    const first = state.conversations[0];
+    await openConversation(first.conversationId, first.peerId);
+  }
+}
+
+async function loadMessages({ before = '', append = false } = {}) {
+  if (!state.activeConversationId) return;
+
+  const params = new URLSearchParams();
+  params.set('conversationId', state.activeConversationId);
+  params.set('limit', append ? '60' : '120');
+  if (before) params.set('before', before);
+
+  const payload = await api(`/messages?${params.toString()}`);
+
+  if (!append) {
+    state.messagesById.clear();
   }
 
-  els.input.value = '';
-  els.input.focus();
+  payload.messages.forEach((message) => {
+    const existing = state.messagesById.get(message.id) || {};
+    state.messagesById.set(message.id, { ...existing, ...message });
+  });
+
+  state.nextCursor = payload.nextCursor || null;
+  renderMessages();
+  autoReadVisibleMessages().catch(() => {});
+}
+
+async function loadOlderOnScroll() {
+  if (!state.nextCursor || state.loadingOlder || !state.activeConversationId) return;
+  state.loadingOlder = true;
+
+  const prevHeight = els.messages.scrollHeight;
+  const prevTop = els.messages.scrollTop;
+  try {
+    await loadMessages({ before: state.nextCursor, append: true });
+    const delta = els.messages.scrollHeight - prevHeight;
+    els.messages.scrollTop = prevTop + delta;
+  } finally {
+    state.loadingOlder = false;
+  }
 }
 
 async function markAsRead(messageId) {
-  if (inflightReadIds.has(messageId)) return;
-  inflightReadIds.add(messageId);
+  if (state.inflightReadIds.has(messageId)) return;
+  state.inflightReadIds.add(messageId);
   try {
-    const response = await fetch(`/messages/${encodeURIComponent(messageId)}/read`, {
+    const payload = await api(`/messages/${encodeURIComponent(messageId)}/read`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authHeaders()
-      },
-      body: JSON.stringify({
-        reader: els.myId.value.trim() || 'unknown'
-      })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
     });
 
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || `Failed to mark read (${response.status})`);
-    }
-
-    const payload = await response.json();
     if (payload.message) {
-      upsertMessage(payload.message);
+      upsertIncomingMessage(payload.message);
     }
   } finally {
-    inflightReadIds.delete(messageId);
+    state.inflightReadIds.delete(messageId);
   }
 }
 
 async function autoReadVisibleMessages() {
-  if (!isForegroundActive()) return;
+  if (!isForegroundActive() || !state.user) return;
+  const me = normalizeId(state.user.userId);
 
-  const myId = normalizeId(els.myId.value);
-  const unreadForMe = [];
-  for (const message of messagesById.values()) {
-    if (
-      normalizeId(message.recipient) === myId &&
-      message.status !== 'read' &&
-      !inflightReadIds.has(message.id)
-    ) {
-      unreadForMe.push(message.id);
+  const unread = [];
+  for (const message of state.messagesById.values()) {
+    if (normalizeId(message.recipient) === me && message.status !== 'read' && !state.inflightReadIds.has(message.id)) {
+      unread.push(message.id);
     }
   }
 
-  for (const id of unreadForMe) {
+  for (const id of unread) {
     try {
       await markAsRead(id);
     } catch (error) {
@@ -464,29 +394,236 @@ async function autoReadVisibleMessages() {
   }
 }
 
-function startReadSweep() {
-  if (readSweepTimer) return;
-  readSweepTimer = setInterval(() => {
-    autoReadVisibleMessages().catch(() => {});
-  }, READ_SWEEP_MS);
+function startTimers() {
+  if (!state.liveSyncTimer) {
+    state.liveSyncTimer = setInterval(() => {
+      refreshConversations().catch(() => {});
+      if (state.activeConversationId) {
+        loadMessages().catch(() => {});
+      }
+    }, LIVE_SYNC_MS);
+  }
+
+  if (!state.readSweepTimer) {
+    state.readSweepTimer = setInterval(() => {
+      autoReadVisibleMessages().catch(() => {});
+    }, READ_SWEEP_MS);
+  }
 }
 
-function init() {
-  applyPrefs();
-  syncTitle();
-  savePrefs();
-  startLiveSync();
-  startReadSweep();
+async function openConversation(conversationId, peerId) {
+  state.activeConversationId = conversationId;
+  state.activePeerId = peerId || '';
+  saveSession();
 
-  els.composer.addEventListener('submit', (event) => {
-    sendMessage(event).catch((error) => {
-      console.error(error);
-      alert(error.message);
-    });
+  els.chatTitle.textContent = peerId || conversationId;
+  setMobileView('chat');
+  renderChatList();
+  await loadMessages();
+}
+
+async function sendMessage(event) {
+  event.preventDefault();
+
+  const text = els.input.value.trim();
+  if (!text || !state.activeConversationId) return;
+
+  const recipient = state.activePeerId || normalizeId(els.newChatPeer.value);
+  if (!recipient) return;
+
+  await api('/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      conversationId: state.activeConversationId,
+      recipient,
+      text
+    })
   });
 
-  els.connectBtn.addEventListener('click', () => {
-    reconnectNow().catch((error) => {
+  els.input.value = '';
+  els.input.focus();
+}
+
+async function createOrOpenDirect(peerInput) {
+  const peerId = normalizeId(peerInput);
+  if (!peerId) return;
+  if (!state.user) return;
+
+  const payload = await api(`/conversations/direct?peerId=${encodeURIComponent(peerId)}`, {
+    method: 'POST'
+  });
+  const conversationId = payload.conversationId || directConversationId(state.user.userId, peerId);
+  await refreshConversations();
+  await openConversation(conversationId, peerId);
+}
+
+function showAuth(status = '', mode = 'login') {
+  els.authView.classList.remove('hidden');
+  els.chatView.classList.add('hidden');
+  els.authStatus.textContent = status;
+  setAuthMode(mode);
+}
+
+function showChat() {
+  els.authView.classList.add('hidden');
+  els.chatView.classList.remove('hidden');
+  els.currentUser.textContent = `@${state.user.userId}`;
+  setMobileView('list');
+}
+
+function setMobileView(view) {
+  if (!window.matchMedia('(max-width: 920px)').matches) return;
+  els.chatView.classList.remove('mobile-chat', 'mobile-list');
+  els.chatView.classList.add(view === 'chat' ? 'mobile-chat' : 'mobile-list');
+}
+
+function setAuthMode(mode) {
+  state.authMode = mode === 'register' ? 'register' : 'login';
+  const isRegister = state.authMode === 'register';
+
+  els.authModeLogin.classList.toggle('active', !isRegister);
+  els.authModeRegister.classList.toggle('active', isRegister);
+  els.authDisplayGroup.classList.toggle('hidden', !isRegister);
+  els.authSubmitBtn.textContent = isRegister ? 'Create account' : 'Login';
+  els.authModeHint.textContent = isRegister
+    ? 'Create your account. After registering, sign in from Login.'
+    : 'Sign in to continue.';
+}
+
+async function bootstrapFromSession() {
+  const session = loadSession();
+  if (!session.token) {
+    try {
+      const status = await api('/auth/status');
+      if (!status.hasUsers) {
+        showAuth('No users found. Please register first.', 'register');
+      } else {
+        showAuth('', 'login');
+      }
+    } catch {
+      showAuth('', 'login');
+    }
+    return;
+  }
+
+  state.token = session.token;
+
+  try {
+    const me = await api('/auth/me');
+    state.user = me.user;
+    showChat();
+    await refreshConversations();
+
+    if (session.activeConversationId) {
+      const match = state.conversations.find((c) => c.conversationId === session.activeConversationId);
+      if (match) {
+        await openConversation(match.conversationId, match.peerId);
+      }
+    }
+
+    await connectRealtime();
+    startTimers();
+  } catch {
+    state.token = '';
+    state.user = null;
+    clearSession();
+    showAuth('Session expired. Please login again.', 'login');
+  }
+}
+
+function wireEvents() {
+  els.authPassToggle.addEventListener('click', () => {
+    const showing = els.authPass.type === 'text';
+    els.authPass.type = showing ? 'password' : 'text';
+    els.authPassToggle.textContent = showing ? '👁' : '🙈';
+    els.authPassToggle.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+    els.authPassToggle.setAttribute('title', showing ? 'Show password' : 'Hide password');
+  });
+
+  els.authForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const userId = normalizeId(els.authUser.value);
+    const password = els.authPass.value;
+
+    if (state.authMode === 'register') {
+      const displayName = els.authDisplay.value.trim();
+      try {
+        await api('/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId, password, displayName })
+        });
+        els.authPass.value = '';
+        setAuthMode('login');
+        showAuth('Registration successful. Please login.', 'login');
+      } catch (error) {
+        showAuth(error.message, 'register');
+      }
+      return;
+    }
+
+    try {
+      const payload = await api('/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, password })
+      });
+
+      state.token = payload.session.token;
+      state.user = payload.user;
+      saveSession();
+      showChat();
+      await refreshConversations();
+      await connectRealtime();
+      startTimers();
+    } catch (error) {
+      showAuth(error.message, 'login');
+    }
+  });
+
+  els.authModeLogin.addEventListener('click', () => {
+    setAuthMode('login');
+    els.authStatus.textContent = '';
+  });
+
+  els.authModeRegister.addEventListener('click', () => {
+    setAuthMode('register');
+    els.authStatus.textContent = '';
+  });
+
+  els.logoutBtn.addEventListener('click', async () => {
+    try {
+      await api('/auth/logout', { method: 'POST' });
+    } catch {
+      // ignore logout network errors
+    }
+
+    closeSocket();
+    state.token = '';
+    state.user = null;
+    state.activeConversationId = '';
+    state.activePeerId = '';
+    state.conversations = [];
+    state.messagesById.clear();
+    clearSession();
+    showAuth('Logged out.');
+  });
+
+  els.backBtn.addEventListener('click', () => {
+    setMobileView('list');
+  });
+
+  els.newChatForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    createOrOpenDirect(els.newChatPeer.value).catch((error) => {
+      console.error(error);
+    });
+    els.newChatPeer.value = '';
+  });
+
+  els.reconnectBtn.addEventListener('click', () => {
+    connectRealtime().catch((error) => {
       setConnection('reconnecting', error.message);
       scheduleReconnect('Manual reconnect failed');
     });
@@ -494,48 +631,21 @@ function init() {
 
   els.messages.addEventListener('scroll', () => {
     if (els.messages.scrollTop > 40) return;
-    if (!nextCursor || loadingOlder) return;
-    loadOlder().catch((error) => {
+    loadOlderOnScroll().catch((error) => {
       console.error(error);
     });
   });
 
-  const rejoinConversation = () => {
-    savePrefs();
-    syncTitle();
-    reconnectNow().catch((error) => {
-      setConnection('reconnecting', error.message);
-      scheduleReconnect('Conversation switch failed');
-    });
-  };
-
-  els.myId.addEventListener('input', rejoinConversation);
-  els.peerId.addEventListener('input', rejoinConversation);
-
-  els.token.addEventListener('input', () => {
-    savePrefs();
-    if (tokenDebounceTimer) {
-      clearTimeout(tokenDebounceTimer);
-    }
-    tokenDebounceTimer = setTimeout(() => {
-      reconnectNow().catch((error) => {
-        setConnection('reconnecting', error.message);
-        scheduleReconnect('Auth update failed');
-      });
-    }, 500);
-  });
-
-  window.addEventListener('online', () => {
-    reconnectNow().catch(() => {
-      scheduleReconnect('Network restored');
+  els.composer.addEventListener('submit', (event) => {
+    sendMessage(event).catch((error) => {
+      console.error(error);
     });
   });
 
   window.addEventListener('focus', () => {
-    fetchRecentIncremental().catch(() => {});
     autoReadVisibleMessages().catch(() => {});
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      reconnectNow().catch(() => {
+    if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+      connectRealtime().catch(() => {
         scheduleReconnect('Resuming...');
       });
     }
@@ -547,10 +657,13 @@ function init() {
     }
   });
 
-  reconnectNow().catch((error) => {
-    setConnection('reconnecting', error.message);
-    scheduleReconnect('Initial connect failed');
+  window.addEventListener('resize', () => {
+    setMobileView(state.activeConversationId ? 'chat' : 'list');
   });
 }
 
-init();
+wireEvents();
+bootstrapFromSession().catch((error) => {
+  console.error(error);
+  showAuth('Failed to initialize app.');
+});

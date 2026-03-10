@@ -7,50 +7,83 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main class="app-shell">
-      <aside class="sidebar">
-        <div class="brand">
+    <main class="page">
+      <section id="auth-view" class="auth-view">
+        <div class="auth-card">
           <h1>Realtime Chat</h1>
-          <p class="subtle">Webhook + stream demo</p>
-        </div>
+          <p id="auth-mode-hint">Sign in to continue.</p>
 
-        <div class="form-group">
-          <label for="my-id">Me</label>
-          <input id="my-id" value="agent-1" />
-        </div>
-
-        <div class="form-group">
-          <label for="peer-id">Contact</label>
-          <input id="peer-id" value="customer-1" />
-        </div>
-
-        <div class="form-group">
-          <label for="token">Token</label>
-          <input id="token" placeholder="WEBHOOK_TOKEN" />
-        </div>
-
-        <button id="connect-btn" class="btn secondary">Reconnect (manual)</button>
-        <p class="hint">Connection auto-recovers. Manual reconnect is optional.</p>
-        <p class="hint">Profile is saved in URL hash; reuse it when tunnel URL changes.</p>
-      </aside>
-
-      <section class="chat-panel">
-        <header class="chat-header">
-          <div class="title-wrap">
-            <h2 id="chat-title">customer-1</h2>
-            <p id="connection-status" class="status-line">
-              <span id="status-dot" class="status-dot connecting"></span>
-              <span id="connection-status-text">Connecting...</span>
-            </p>
+          <div class="auth-mode-row">
+            <button id="auth-mode-login" type="button" class="mode-btn active">Login</button>
+            <button id="auth-mode-register" type="button" class="mode-btn">Register</button>
           </div>
-        </header>
 
-        <section id="messages" class="messages"></section>
+          <form id="auth-form" class="auth-form">
+            <div class="form-group">
+              <label for="auth-user">Username</label>
+              <input id="auth-user" placeholder="Username" required />
+            </div>
+            <div id="auth-display-group" class="form-group hidden">
+              <label for="auth-display">Display name (for register)</label>
+              <input id="auth-display" placeholder="Display name" />
+            </div>
+            <div class="form-group">
+              <label for="auth-pass">Password</label>
+              <div class="password-wrap">
+                <input id="auth-pass" type="password" placeholder="******" required />
+                <button id="auth-pass-toggle" class="pass-toggle" type="button" aria-label="Show password" title="Show password">👁</button>
+              </div>
+            </div>
 
-        <form id="composer" class="composer">
-          <input id="message-input" placeholder="Type a message" autocomplete="off" required />
-          <button class="btn" type="submit">Send</button>
-        </form>
+            <div class="auth-actions">
+              <button id="auth-submit-btn" type="submit" class="btn">Login</button>
+            </div>
+          </form>
+
+          <p id="auth-status" class="status-text"></p>
+        </div>
+      </section>
+
+      <section id="chat-view" class="app-shell hidden">
+        <aside class="sidebar">
+          <div class="brand-row">
+            <div>
+              <h2 id="current-user">@user</h2>
+              <p class="subtle">Conversations</p>
+            </div>
+            <button id="logout-btn" class="btn secondary small" type="button">Logout</button>
+          </div>
+
+          <form id="new-chat-form" class="new-chat-form">
+            <input id="new-chat-peer" placeholder="Start chat with username" required />
+            <button class="btn" type="submit">Open</button>
+          </form>
+
+          <div id="chat-list" class="chat-list"></div>
+        </aside>
+
+        <section class="chat-panel">
+          <header class="chat-header">
+            <div class="title-wrap">
+              <h2 id="chat-title">Select a conversation</h2>
+              <p id="connection-status" class="status-line">
+                <span id="status-dot" class="status-dot connecting"></span>
+                <span id="connection-status-text">Connecting...</span>
+              </p>
+            </div>
+            <div class="chat-header-actions">
+              <button id="back-btn" class="btn secondary small back-btn" type="button">Back</button>
+              <button id="reconnect-btn" class="btn secondary small" type="button">Reconnect</button>
+            </div>
+          </header>
+
+          <section id="messages" class="messages"></section>
+
+          <form id="composer" class="composer">
+            <input id="message-input" placeholder="Type a message" autocomplete="off" required />
+            <button class="btn" type="submit">Send</button>
+          </form>
+        </section>
       </section>
     </main>
 

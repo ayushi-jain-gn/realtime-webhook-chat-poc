@@ -1,0 +1,205 @@
+**1) POC Summary**
+This project is a multi-user realtime chat proof-of-concept that demonstrates:
+
+1. User registration and login.
+2. Session-based authenticated APIs.
+3. Conversation list per logged-in user.
+4. Per-user authorization for conversation access.
+5. Realtime messaging over WebSocket (with SSE fallback route still present).
+6. Read receipts (WhatsApp-like ticks + foreground-based read behavior).
+7. Scroll-up cursor pagination for older messages.
+8. Webhook ingestion path for external systems.
+9. SQLite persistence with relational schema.
+10. Public sharing through Cloudflare/ngrok tunnel scripts.
+
+Primary files:
+- Backend server: [src/server.js](/Users/akshay.jain/WebstormProjects/projects/poc-realtime-messages/src/server.js)
+- Storage/data layer: [src/storage.js](/Users/akshay.jain/WebstormProjects/projects/poc-realtime-messages/src/storage.js)
+- Frontend app logic: [public/app.js](/Users/akshay.jain/WebstormProjects/projects/poc-realtime-messages/public/app.js)
+- Frontend markup: [public/index.html](/Users/akshay.jain/WebstormProjects/projects/poc-realtime-messages/public/index.html)
+- Frontend styles: [public/styles.css](/Users/akshay.jain/WebstormProjects/projects/poc-realtime-messages/public/styles.css)
+- Share/tunnel script: [scripts/share.sh](/Users/akshay.jain/WebstormProjects/projects/poc-realtime-messages/scripts/share.sh)
+- Project manifest: [package.json](/Users/akshay.jain/WebstormProjects/projects/poc-realtime-messages/package.json)
+- Docs: [README.md](/Users/akshay.jain/WebstormProjects/projects/poc-realtime-messages/README.md)
+
+---
+
+**2) Problem This POC Solves**
+1. Capture and process messages in realtime.
+2. Let multiple users chat from different devices/networks.
+3. Secure access so users only see their own conversations.
+4. Keep architecture integration-friendly via webhooks and APIs.
+5. Make it demoable quickly with minimal operational overhead.
+
+---
+
+**3) High-Level Architecture**
+1. Browser UI authenticates user with backend (`/auth/*`).
+2. Backend issues session token.
+3. UI opens WebSocket connection to `/ws?token=...`.
+4. UI fetches conversation list via `/conversations`.
+5. UI fetches messages for selected conversation with cursor pagination via `/messages`.
+6. Sending a message uses `/messages` (authenticated).
+7. Backend stores message in SQLite and broadcasts realtime events to authorized clients only.
+8. Read receipts are posted to `/messages/:id/read` and broadcast similarly.
+9. External systems can still post to `/webhook/incoming` or `/webhook/outgoing` using `WEBHOOK_TOKEN`.
+
+---
+
+**4) Backend API Surface**
+Auth:
+1. `POST /auth/register`
+2. `POST /auth/login`
+3. `POST /auth/logout`
+4. `GET /auth/me`
+5. `GET /auth/status` (used to detect first-run/no users)
+
+Conversations:
+1. `GET /conversations`
+2. `POST /conversations/direct?peerId=<user>`
+
+Messages:
+1. `POST /messages`
+2. `GET /messages?conversationId=<id>&limit=<n>&before=<cursor>`
+3. `POST /messages/:id/read`
+
+Realtime:
+1. `GET /ws` (WebSocket upgrade, session token required)
+2. `GET /stream` (SSE fallback, session token required)
+
+Webhook integration:
+1. `POST /webhook/incoming`
+2. `POST /webhook/outgoing`
+
+Ops:
+1. `GET /health`
+
+---
+
+**5) Authentication and Session Model**
+1. Registration stores `user_id`, `display_name`, `password_salt`, `password_hash`.
+2. Password hashing uses Node `crypto.scryptSync` with random salt.
+3. Login validates password and issues random session token.
+4. Session token is stored in `sessions` table with `expires_at`.
+5. Protected endpoints read bearer token from `Authorization` header or query `token` in websocket/sse paths.
+6. Expired sessions are cleaned up.
+7. Frontend stores session token in `localStorage` key `realtime-chat-session:v1`.
+
+---
+
+**6) Authorization Rules**
+1. Conversation membership is enforced at backend storage/server level.
+2. `GET /messages` requires the requester to be a member of `conversationId`.
+3. `POST /messages/:id/read` requires membership in message’s conversation.
+4. Realtime broadcast filters by `conversationId` and user membership before sending.
+5. This prevents one user from listening to another user’s conversation stream by guessing IDs.
+
+---
+
+**7) Data Model (SQLite)**
+Stored in: `data/messages.db`
+
+Tables:
+1. `users`
+2. `sessions`
+3. `conversations`
+4. `conversation_members`
+5. `messages`
+6. `message_receipts`
+
+Important behavior:
+1. Direct conversation ID format: `direct:<sortedUserA>:<sortedUserB>`.
+2. Messages are linked to conversations.
+3. Receipts track state per message per user.
+4. Conversation list query computes unread counts from receipts.
+5. Cursor pagination uses `(received_at, id)` ordering and base64url cursor.
+
+---
+
+**8) Realtime Delivery Design**
+1. Primary realtime channel is WebSocket (`/ws`).
+2. Server sends events:
+   - `ready`
+   - `message`
+   - `message_status`
+   - `ping`
+3. Client reconnect strategy:
+   - Exponential backoff with jitter.
+   - Manual reconnect button still available.
+   - Auto-reconnect on focus/online transitions.
+4. Client also runs periodic sync (`/messages`) as resilience fallback.
+5. This hybrid approach improves reliability over unstable mobile/tunnel networks.
+
+---
+
+**9) Read Receipts (WhatsApp-like)**
+1. No manual “mark read” button.
+2. Messages are auto-marked read only when recipient page is foreground/focused.
+3. Tick UI:
+   - `✓` sent
+   - `✓✓` delivered
+   - `✓✓` blue for read
+4. Read updates are broadcast in realtime via `message_status` event.
+
+---
+
+**10) Pagination and Older Messages**
+1. No “Load older” button now.
+2. Scroll to top triggers fetch of older page via `before=<nextCursor>`.
+3. Cursor comes from backend response `nextCursor`.
+4. Client preserves scroll position when prepending old messages to avoid jumpy UX.
+
+---
+
+**11) Frontend UX Flow**
+Auth view:
+1. Login/Register mode tabs.
+2. Register mode reveals display name field.
+3. Register does not auto-login.
+4. After register: prompt user to login.
+5. Password show/hide eye toggle is implemented.
+
+Chat view:
+1. Left sidebar shows current user and conversation list.
+2. “Open” creates/opens direct chat with username.
+3. Header shows active chat and connection status.
+4. Message composer always sends as logged-in user.
+5. Scroll up loads older history.
+
+---
+
+**12) Webhooks vs App Messaging**
+1. User-to-user app chat uses authenticated `/messages`.
+2. Webhooks remain for external integrations and are protected by `WEBHOOK_TOKEN`.
+3. Webhook paths can ingest events from providers/bots/other systems.
+
+---
+
+**13) Tunnel/Public Access**
+Share script:
+- [scripts/share.sh](/Users/akshay.jain/WebstormProjects/projects/poc-realtime-messages/scripts/share.sh)
+
+What it does:
+1. Starts app in background.
+2. Starts tunnel (cloudflared/ngrok mode).
+3. Prints public URL.
+4. Uses `127.0.0.1` origin for cloudflared to avoid IPv6 localhost issues.
+
+Known practical note:
+1. If app crashes, tunnel stays up but origin becomes unreachable.
+2. You’ll see `connection refused` in cloudflared logs in that case.
+
+---
+
+**14) Important Fixes Added During Iteration**
+1. Legacy DB schema migration handling:
+   - New schema DB is created.
+2. Crash prevention for missing peer user in direct chat creation:
+   - Backend now returns `User not found: <peerId>` instead of crashing.
+3. Connection reliability improvements for mobile/tunnel behavior.
+4. Foreground-based read receipts.
+5. Scroll-based older message loading.
+6. Auth mode UX split (Login/Register) and “register first” path for empty system.
+
+---
+
