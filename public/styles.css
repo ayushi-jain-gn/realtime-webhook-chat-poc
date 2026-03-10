@@ -21,6 +21,7 @@ body {
   font-family: "Avenir Next", "Segoe UI", sans-serif;
   color: var(--text);
   overflow: hidden;
+  overflow-x: hidden;
   background:
     radial-gradient(circle at 10% 10%, #ecfff6, transparent 28%),
     radial-gradient(circle at 90% 15%, #d9ebff, transparent 24%),
@@ -37,6 +38,7 @@ body {
   place-items: center;
   padding: 12px;
   overflow: hidden;
+  overflow-x: hidden;
 }
 
 .auth-view {
@@ -157,6 +159,7 @@ input {
   overflow: hidden;
   background: var(--surface);
   box-shadow: var(--shadow);
+  min-width: 0;
 }
 
 .sidebar {
@@ -167,6 +170,7 @@ input {
   min-height: 0;
   border-right: 1px solid var(--border);
   background: linear-gradient(180deg, #f2fbf7, #f8fbfe 65%);
+  overflow: hidden;
 }
 
 .brand-row {
@@ -195,6 +199,7 @@ input {
 
 .chat-list {
   min-height: 0;
+  flex: 1 1 auto;
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -260,6 +265,7 @@ input {
   grid-template-rows: auto 1fr auto;
   min-height: 0;
   background: var(--surface-soft);
+  min-width: 0;
 }
 
 .chat-header {
@@ -270,6 +276,15 @@ input {
   padding: 16px 18px;
   color: #fff;
   background: linear-gradient(135deg, #1b7b56, #169e68);
+}
+
+.chat-header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.back-btn {
+  display: none;
 }
 
 .title-wrap h2 {
@@ -287,6 +302,8 @@ input {
 .messages {
   padding: 18px;
   overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
   background:
     radial-gradient(circle at top right, #f3fff8, transparent 32%),
     linear-gradient(180deg, #f6fbff 0%, #eef5f8 100%);
@@ -311,6 +328,8 @@ input {
   padding: 10px 12px;
   line-height: 1.35;
   box-shadow: 0 2px 8px rgba(16, 33, 39, 0.08);
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
 }
 
 .message.incoming .bubble {
@@ -402,10 +421,22 @@ input {
 }
 
 @media (max-width: 920px) {
+  body {
+    overflow: auto;
+    overflow-x: hidden;
+  }
+
+  .page {
+    height: auto;
+    min-height: 100dvh;
+    place-items: stretch;
+    padding: 0;
+  }
+
   .app-shell {
     grid-template-columns: 1fr;
     width: 100%;
-    height: 100vh;
+    height: 100dvh;
     margin: 0;
     border-radius: 0;
     border: 0;
@@ -414,6 +445,7 @@ input {
   .sidebar {
     border-right: 0;
     border-bottom: 1px solid var(--border);
+    overflow: hidden;
   }
 
   .messages {
@@ -422,6 +454,22 @@ input {
 
   .chat-header {
     flex-wrap: wrap;
+  }
+
+  .back-btn {
+    display: inline-flex;
+  }
+
+  .app-shell.mobile-chat .sidebar {
+    display: none;
+  }
+
+  .app-shell.mobile-chat .chat-panel {
+    display: grid;
+  }
+
+  .app-shell.mobile-list .chat-panel {
+    display: none;
   }
 
   .composer {

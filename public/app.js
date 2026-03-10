@@ -18,6 +18,7 @@ const els = {
   newChatPeer: document.getElementById('new-chat-peer'),
   chatList: document.getElementById('chat-list'),
   chatTitle: document.getElementById('chat-title'),
+  backBtn: document.getElementById('back-btn'),
   reconnectBtn: document.getElementById('reconnect-btn'),
   statusText: document.getElementById('connection-status-text'),
   statusDot: document.getElementById('status-dot'),
@@ -416,6 +417,7 @@ async function openConversation(conversationId, peerId) {
   saveSession();
 
   els.chatTitle.textContent = peerId || conversationId;
+  setMobileView('chat');
   renderChatList();
   await loadMessages();
 }
@@ -467,6 +469,13 @@ function showChat() {
   els.authView.classList.add('hidden');
   els.chatView.classList.remove('hidden');
   els.currentUser.textContent = `@${state.user.userId}`;
+  setMobileView('list');
+}
+
+function setMobileView(view) {
+  if (!window.matchMedia('(max-width: 920px)').matches) return;
+  els.chatView.classList.remove('mobile-chat', 'mobile-list');
+  els.chatView.classList.add(view === 'chat' ? 'mobile-chat' : 'mobile-list');
 }
 
 function setAuthMode(mode) {
@@ -601,6 +610,10 @@ function wireEvents() {
     showAuth('Logged out.');
   });
 
+  els.backBtn.addEventListener('click', () => {
+    setMobileView('list');
+  });
+
   els.newChatForm.addEventListener('submit', (event) => {
     event.preventDefault();
     createOrOpenDirect(els.newChatPeer.value).catch((error) => {
@@ -642,6 +655,10 @@ function wireEvents() {
     if (document.visibilityState === 'visible') {
       autoReadVisibleMessages().catch(() => {});
     }
+  });
+
+  window.addEventListener('resize', () => {
+    setMobileView(state.activeConversationId ? 'chat' : 'list');
   });
 }
 
