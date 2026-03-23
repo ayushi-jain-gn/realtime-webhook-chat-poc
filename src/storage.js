@@ -12,17 +12,29 @@ class MessageStore {
   async init() {
     await fs.mkdir(this.dataDir, { recursive: true });
     this.db = new Database(this.dbPath);
+    await this.ensureCompatibleSchema();
     this.db.pragma('journal_mode = WAL');
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS users (
         user_id TEXT PRIMARY KEY,
-        display_name TEXT,
+        display_name TEXT NOT NULL,
+        password_salt TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
         created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
       );
 
       CREATE TABLE IF NOT EXISTS conversations (
         conversation_id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
 
@@ -62,25 +74,48 @@ class MessageStore {
         FOREIGN KEY (user_id) REFERENCES users(user_id)
       );
 
-      CREATE INDEX IF NOT EXISTS idx_messages_conv_received
-        ON messages(conversation_id, received_at DESC, id DESC);
-
-      CREATE INDEX IF NOT EXISTS idx_messages_direction_received
-        ON messages(direction, received_at DESC, id DESC);
-
-      CREATE INDEX IF NOT EXISTS idx_receipts_message
-        ON message_receipts(message_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_members_user ON conversation_members(user_id);
+      CREATE INDEX IF NOT EXISTS idx_messages_conv_received ON messages(conversation_id, received_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_receipts_user_status ON message_receipts(user_id, status);
     `);
 
-    this.upsertUserStmt = this.db.prepare(`
-      INSERT INTO users (user_id, display_name, created_at)
-      VALUES (?, ?, ?)
-      ON CONFLICT(user_id) DO UPDATE SET display_name = excluded.display_name
+    this.createUserStmt = this.db.prepare(`
+      INSERT INTO users (user_id, display_name, password_salt, password_hash, created_at)
+      VALUES (?, ?, ?, ?, ?)
     `);
+
+    this.getUserStmt = this.db.prepare(`
+      SELECT user_id, display_name, password_salt, password_hash, created_at
+      FROM users
+      WHERE user_id = ?
+    `);
+
+    this.upsertMinimalUserStmt = this.db.prepare(`
+      INSERT INTO users (user_id, display_name, password_salt, password_hash, created_at)
+      VALUES (?, ?, '', '', ?)
+      ON CONFLICT(user_id) DO NOTHING
+    `);
+
+    this.createSessionStmt = this.db.prepare(`
+      INSERT INTO sessions (token, user_id, created_at, expires_at)
+      VALUES (?, ?, ?, ?)
+    `);
+
+    this.deleteSessionStmt = this.db.prepare('DELETE FROM sessions WHERE token = ?');
+
+    this.getSessionStmt = this.db.prepare(`
+      SELECT s.token, s.user_id, s.expires_at, u.display_name
+      FROM sessions s
+      JOIN users u ON u.user_id = s.user_id
+      WHERE s.token = ?
+    `);
+
+    this.cleanupSessionsStmt = this.db.prepare('DELETE FROM sessions WHERE expires_at < ?');
 
     this.upsertConversationStmt = this.db.prepare(`
-      INSERT INTO conversations (conversation_id, created_at)
-      VALUES (?, ?)
+      INSERT INTO conversations (conversation_id, type, created_at)
+      VALUES (?, ?, ?)
       ON CONFLICT(conversation_id) DO NOTHING
     `);
 
@@ -89,6 +124,10 @@ class MessageStore {
       VALUES (?, ?, 'participant', ?)
       ON CONFLICT(conversation_id, user_id) DO NOTHING
     `);
+
+    this.isMemberStmt = this.db.prepare(
+      'SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ? LIMIT 1'
+    );
 
     this.insertMessageStmt = this.db.prepare(`
       INSERT INTO messages (
@@ -107,27 +146,6 @@ class MessageStore {
         status = excluded.status,
         updated_at = excluded.updated_at
     `);
-
-    this.listMessagesBase = `
-      SELECT
-        m.id,
-        m.conversation_id,
-        m.direction,
-        m.channel,
-        m.sender_id,
-        m.recipient_id,
-        m.text,
-        m.metadata,
-        m.provider_timestamp,
-        m.received_at,
-        m.processed_at,
-        m.tags,
-        rr.status AS recipient_status,
-        rr.updated_at AS recipient_status_at
-      FROM messages m
-      LEFT JOIN message_receipts rr
-        ON rr.message_id = m.id AND rr.user_id = m.recipient_id
-    `;
 
     this.getMessageStmt = this.db.prepare(`
       SELECT
@@ -153,12 +171,11 @@ class MessageStore {
 
     this.countMessagesStmt = this.db.prepare('SELECT COUNT(1) AS count FROM messages');
     this.countConversationsStmt = this.db.prepare('SELECT COUNT(1) AS count FROM conversations');
+    this.countUsersStmt = this.db.prepare('SELECT COUNT(1) AS count FROM users');
 
     this.addMessageTx = this.db.transaction((message) => {
       const now = new Date().toISOString();
-      this.upsertUserStmt.run(message.sender, message.sender, now);
-      this.upsertUserStmt.run(message.recipient, message.recipient, now);
-      this.upsertConversationStmt.run(message.conversationId, now);
+      this.upsertConversationStmt.run(message.conversationId, 'direct', now);
       this.upsertConversationMemberStmt.run(message.conversationId, message.sender, now);
       this.upsertConversationMemberStmt.run(message.conversationId, message.recipient, now);
 
@@ -166,6 +183,137 @@ class MessageStore {
 
       this.upsertReceiptStmt.run(message.id, message.sender, 'sent', now);
       this.upsertReceiptStmt.run(message.id, message.recipient, 'delivered', now);
+    });
+  }
+
+  async ensureCompatibleSchema() {
+    const hasMessages = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'")
+      .get();
+
+    if (!hasMessages) {
+      return;
+    }
+
+    const columns = this.db.prepare('PRAGMA table_info(messages)').all().map((col) => col.name);
+    const compatible =
+      columns.includes('conversation_id') && columns.includes('sender_id') && columns.includes('recipient_id');
+    if (compatible) {
+      return;
+    }
+
+    this.db.close();
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const legacyPath = this.dbPath.replace(/\.db$/, `.legacy-${stamp}.db`);
+    await fs.rename(this.dbPath, legacyPath);
+    await fs.rm(`${this.dbPath}-wal`, { force: true }).catch(() => {});
+    await fs.rm(`${this.dbPath}-shm`, { force: true }).catch(() => {});
+
+    this.db = new Database(this.dbPath);
+  }
+
+  cleanupExpiredSessions(nowIso) {
+    this.cleanupSessionsStmt.run(nowIso);
+  }
+
+  createUser({ userId, displayName, passwordSalt, passwordHash }) {
+    const now = new Date().toISOString();
+    this.createUserStmt.run(userId, displayName, passwordSalt, passwordHash, now);
+  }
+
+  getUserById(userId) {
+    return this.getUserStmt.get(userId) || null;
+  }
+
+  createSession({ token, userId, expiresAt }) {
+    const now = new Date().toISOString();
+    this.createSessionStmt.run(token, userId, now, expiresAt);
+  }
+
+  deleteSession(token) {
+    this.deleteSessionStmt.run(token);
+  }
+
+  getSession(token) {
+    return this.getSessionStmt.get(token) || null;
+  }
+
+  ensureConversationForPair(userA, userB) {
+    const normalizedA = String(userA).trim().toLowerCase();
+    const normalizedB = String(userB).trim().toLowerCase();
+    const members = [normalizedA, normalizedB].sort();
+    const conversationId = `direct:${members[0]}:${members[1]}`;
+    const now = new Date().toISOString();
+
+    this.upsertMinimalUserStmt.run(normalizedA, normalizedA, now);
+    this.upsertMinimalUserStmt.run(normalizedB, normalizedB, now);
+    this.upsertConversationStmt.run(conversationId, 'direct', now);
+    this.upsertConversationMemberStmt.run(conversationId, normalizedA, now);
+    this.upsertConversationMemberStmt.run(conversationId, normalizedB, now);
+
+    return conversationId;
+  }
+
+  isConversationMember(conversationId, userId) {
+    return Boolean(this.isMemberStmt.get(conversationId, userId));
+  }
+
+  listConversationsForUser(userId, limit = 50) {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          c.conversation_id,
+          c.type,
+          lm.id AS last_message_id,
+          lm.sender_id,
+          lm.recipient_id,
+          lm.text AS last_message_text,
+          lm.received_at AS last_message_at,
+          (
+            SELECT COUNT(1)
+            FROM message_receipts r
+            JOIN messages m2 ON m2.id = r.message_id
+            WHERE m2.conversation_id = c.conversation_id
+              AND r.user_id = ?
+              AND r.status != 'read'
+              AND m2.recipient_id = ?
+          ) AS unread_count
+        FROM conversations c
+        JOIN conversation_members cm ON cm.conversation_id = c.conversation_id
+        LEFT JOIN messages lm
+          ON lm.id = (
+            SELECT m.id
+            FROM messages m
+            WHERE m.conversation_id = c.conversation_id
+            ORDER BY m.received_at DESC, m.id DESC
+            LIMIT 1
+          )
+        WHERE cm.user_id = ?
+        ORDER BY COALESCE(lm.received_at, c.created_at) DESC
+        LIMIT ?
+      `
+      )
+      .all(userId, userId, userId, Math.min(Math.max(Number(limit), 1), 200));
+
+    return rows.map((row) => {
+      const peerId = peerFromConversation(row.conversation_id, userId);
+      return {
+        conversationId: row.conversation_id,
+        type: row.type,
+        peerId,
+        lastMessage: row.last_message_id
+          ? {
+              id: row.last_message_id,
+              text: row.last_message_text,
+              sender: row.sender_id,
+              recipient: row.recipient_id,
+              at: row.last_message_at
+            }
+          : null,
+        unreadCount: Number(row.unread_count || 0)
+      };
     });
   }
 
@@ -215,20 +363,14 @@ class MessageStore {
     this.addMessageTx(message);
   }
 
-  listMessages({ direction, limit, conversationId, beforeCursor }) {
+  listMessagesForUser({ userId, conversationId, limit, beforeCursor }) {
+    if (!this.isConversationMember(conversationId, userId)) {
+      return { messages: [], nextCursor: null, unauthorized: true };
+    }
+
     const safeLimit = Math.min(Math.max(Number(limit || 50), 1), 500);
-    const clauses = [];
-    const params = [];
-
-    if (direction === 'incoming' || direction === 'outgoing') {
-      clauses.push('m.direction = ?');
-      params.push(direction);
-    }
-
-    if (conversationId) {
-      clauses.push('m.conversation_id = ?');
-      params.push(conversationId);
-    }
+    const params = [conversationId];
+    const clauses = ['m.conversation_id = ?'];
 
     const decodedCursor = decodeCursor(beforeCursor);
     if (decodedCursor) {
@@ -236,8 +378,30 @@ class MessageStore {
       params.push(decodedCursor.receivedAt, decodedCursor.receivedAt, decodedCursor.id);
     }
 
-    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-    const sql = `${this.listMessagesBase} ${where} ORDER BY m.received_at DESC, m.id DESC LIMIT ?`;
+    const sql = `
+      SELECT
+        m.id,
+        m.conversation_id,
+        m.direction,
+        m.channel,
+        m.sender_id,
+        m.recipient_id,
+        m.text,
+        m.metadata,
+        m.provider_timestamp,
+        m.received_at,
+        m.processed_at,
+        m.tags,
+        rr.status AS recipient_status,
+        rr.updated_at AS recipient_status_at
+      FROM messages m
+      LEFT JOIN message_receipts rr
+        ON rr.message_id = m.id AND rr.user_id = m.recipient_id
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY m.received_at DESC, m.id DESC
+      LIMIT ?
+    `;
+
     const rows = this.db.prepare(sql).all(...params, safeLimit);
     const messages = rows.map((row) => this.deserializeMessage(row));
 
@@ -247,12 +411,15 @@ class MessageStore {
       nextCursor = encodeCursor({ receivedAt: last.received_at, id: last.id });
     }
 
-    return { messages, nextCursor };
+    return { messages, nextCursor, unauthorized: false };
   }
 
   markAsRead(messageId, reader) {
+    const message = this.getById(messageId);
+    if (!message) return null;
+    if (!this.isConversationMember(message.conversationId, reader)) return null;
+
     const now = new Date().toISOString();
-    this.upsertUserStmt.run(reader, reader, now);
     this.upsertReceiptStmt.run(messageId, reader, 'read', now);
     return this.getById(messageId);
   }
@@ -267,6 +434,10 @@ class MessageStore {
 
   countConversations() {
     return this.countConversationsStmt.get().count;
+  }
+
+  countUsers() {
+    return this.countUsersStmt.get().count;
   }
 
   close() {
@@ -297,6 +468,14 @@ function decodeCursor(cursor) {
   } catch {
     return null;
   }
+}
+
+function peerFromConversation(conversationId, userId) {
+  if (!conversationId.startsWith('direct:')) return null;
+  const parts = conversationId.split(':');
+  const a = parts[1] || '';
+  const b = parts[2] || '';
+  return a === String(userId).toLowerCase() ? b : a;
 }
 
 module.exports = { MessageStore };
